@@ -1,0 +1,13 @@
+.env
+.env.local
+__pycache__/
+*.py[cod]
+.pytest_cache/
+data/*.db
+data/*.db-*
+fantacalcio_cookie.txt
+.secrets/
+.streamlit/secrets.toml
+data/*.sync.lock
+RESUME.md
+.DS_Store
