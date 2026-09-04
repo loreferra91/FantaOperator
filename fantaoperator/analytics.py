@@ -2,6 +2,67 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
+import unicodedata
+
+
+def normalized_name(value):
+    value = str(value or "").casefold().translate(str.maketrans({
+        "ø": "o", "ł": "l", "đ": "d", "ð": "d", "þ": "th", "æ": "ae", "œ": "oe", "ß": "ss",
+    }))
+    value = unicodedata.normalize("NFKD", value)
+    value = "".join(char for char in value if not unicodedata.combining(char))
+    return " ".join(re.findall(r"[a-z0-9]+", value))
+
+
+def _stat_candidates(directory_row, statistics):
+    team = normalized_name(directory_row.get("team"))
+    full = normalized_name(directory_row.get("name"))
+    result = []
+    for stat in statistics:
+        if normalized_name(stat.get("team")) != team:
+            continue
+        short = normalized_name(stat.get("name"))
+        if short == full:
+            result.append(stat)
+            continue
+        parts = short.split()
+        if len(parts) == 1 and (full == short or full.endswith(" " + short)):
+            result.append(stat)
+            continue
+        if len(parts) >= 2 and len(parts[-1]) == 1:
+            surname = " ".join(parts[:-1])
+            full_parts = full.split()
+            if full == surname or (full.endswith(" " + surname) and full_parts[0].startswith(parts[-1])):
+                result.append(stat)
+    return result
+
+
+def merge_player_catalog(directory, statistics):
+    """Join Diretta full names with abbreviated Gazzetta identities only when unique."""
+    directory, statistics = [dict(row) for row in directory], [dict(row) for row in statistics]
+    if not directory:
+        return sorted(({**row, "directory_provider": ""} for row in statistics),
+                      key=lambda row: (normalized_name(row.get("team")), row.get("role", ""), normalized_name(row.get("name"))))
+    result = []
+    candidate_lists = [_stat_candidates(player, statistics) for player in directory]
+    candidate_counts = defaultdict(int)
+    for matches in candidate_lists:
+        for stat in matches:
+            candidate_counts[id(stat)] += 1
+    for player, matches in zip(directory, candidate_lists):
+        row = {**player, "directory_provider": player.get("provider", "Diretta.it")}
+        if len(matches) == 1 and candidate_counts[id(matches[0])] == 1:
+            stat = matches[0]
+            # The complete name, role and current club remain authoritative from Diretta.
+            row.update({key: value for key, value in stat.items() if key not in {"name", "role", "team"}})
+        else:
+            row.update({"vote_provider": "", "provider_player_id": "", "appearances": 0,
+                        "days_present": 0, "average_vote": None, "average_fantavote": None,
+                        "provider_average_fantavote": None, "recent_average_fantavote": None,
+                        "trend": 0, "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0})
+        result.append(row)
+    return sorted(result, key=lambda row: (normalized_name(row.get("team")), row.get("role", ""), normalized_name(row.get("name"))))
 
 
 def season_statistics(records):

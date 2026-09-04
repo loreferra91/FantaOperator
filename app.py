@@ -19,6 +19,7 @@ from fantaoperator.sources import csv_template, safe_url
 from fantaoperator.official_votes import EDITIONS
 from fantaoperator.gazzetta_votes import configure_preferred_source, gazzetta_votes_url, is_gazzetta_votes_url, PROVIDER as GAZZETTA_PROVIDER, EDITION as GAZZETTA_EDITION
 from fantaoperator.updater import import_votes, refresh_votes, sync_due
+from fantaoperator.diretta_rosters import DIRETTA_ROSTERS_URL, PROVIDER as DIRETTA_PROVIDER, sync_diretta_rosters
 
 
 st.set_page_config(
@@ -301,7 +302,7 @@ def page_lineup(db: Database, league: dict, matchday: int) -> None:
 
 def page_auction(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
-    statistics = db.season_statistics(int(league["id"]))
+    statistics = db.complete_player_catalog(int(league["id"]))
     st.title("Auction war room")
     st.caption("Acquisti registrati nella rosa e nel registro movimenti. Il prezzo obiettivo resta una tua valutazione.")
     if "auction_feedback" in st.session_state:
@@ -311,7 +312,13 @@ def page_auction(db: Database, league: dict) -> None:
     candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
                   and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
     if not candidates:
-        st.info("Sincronizza almeno una giornata Gazzetta: i calciatori non ancora in rosa appariranno qui.")
+        st.info("Carica le rose complete Diretta.it per mostrare tutti i calciatori della Serie A.")
+        if st.button("Carica rose Serie A", key="auction_sync_squads"):
+            result = sync_diretta_rosters(db, league["season"])
+            if result["ok"]:
+                st.session_state["auction_feedback"] = f"Rose aggiornate: {result['players']} calciatori in {result['teams']} squadre."
+                st.rerun()
+            st.error(result["error"])
         return
     st.markdown('<div class="subhead">Stop loss calcolato sul budget reale residuo, sugli slot mancanti e sul rendimento ufficiale osservato.</div>', unsafe_allow_html=True)
     left, right = st.columns([1, 1.55], gap="large")
@@ -343,11 +350,11 @@ def page_auction(db: Database, league: dict) -> None:
             except ValueError as exc:
                 st.error(str(exc))
     with right:
-        st.markdown("### Rendimento ufficiale disponibile")
+        st.markdown("### Catalogo Serie A")
         board = pd.DataFrame([{"Giocatore":p["name"],"Ruolo":p["role"],"FM lega":p["average_fantavote"],"Presenze":p["appearances"],
             "MV":p["average_vote"],"Squadra":p["team"],"Gol":p["goals"],"Assist":p["assists"],"Trend %":p["trend"]} for p in candidates])
         st.dataframe(board, hide_index=True, width="stretch")
-        st.caption("Medie e trend provengono solo dalle giornate importate. Non sono previsioni di titolarità né quotazioni d'asta.")
+        st.caption("Rose e ruoli: Diretta.it. Medie e trend, quando presenti, provengono solo dalle giornate Gazzetta importate. Non sono previsioni di titolarità né quotazioni d'asta.")
 
 
 def page_roster(db: Database, league: dict, matchday: int) -> None:
@@ -448,31 +455,40 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
                     st.rerun()
             except (ValueError, UnicodeError) as exc:
                 st.error(str(exc))
-    with st.expander("Aggiungi un giocatore dai voti scaricati"):
-        records = db.records(int(league["id"]), matchday)
+    with st.expander("Aggiungi un giocatore dal catalogo Serie A"):
+        records = db.complete_player_catalog(int(league["id"]))
         owned = {p["name"].casefold() for p in roster}
         owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
-        candidates = [r for r in records if (r.get("source_name"),r.get("provider_player_id")) not in owned_ids
+        candidates = [r for r in records if (r.get("vote_provider"),r.get("provider_player_id")) not in owned_ids
                       and (r.get("provider_player_id") or r["name"].casefold() not in owned)]
         if candidates:
-            names = {f"{r['name']} · {r['team']}": r for r in candidates}
+            teams = sorted({r["team"] for r in candidates}, key=str.casefold)
+            selected_team = st.selectbox("Squadra", teams)
+            team_candidates = [r for r in candidates if r["team"] == selected_team]
+            names = {f"{r['name']} · {r['team']}": r for r in team_candidates}
             chosen = st.selectbox("Giocatore disponibile", list(names))
             cost = st.number_input("Costo d'acquisto", 0, 5000, 1)
             if st.button("Aggiungi alla rosa"):
                 row = names[chosen]
                 display_name = row["name"] if row["name"].casefold() not in owned else f"{row['name']} ({row['team']})"
                 db.replace_roster(int(league["id"]), [*roster, {"name": display_name, "role": row["role"], "team": row["team"], "purchase_cost": cost,
-                    "vote_provider": row["source_name"] if row.get("provider_player_id") else "", "provider_player_id": row.get("provider_player_id", "")}])
+                    "vote_provider": row.get("vote_provider", "") if row.get("provider_player_id") else "", "provider_player_id": row.get("provider_player_id", "")}])
                 st.session_state["roster_feedback"] = "Giocatore aggiunto. Completa le tue stime nella tabella."
                 st.session_state["roster_version"] = editor_version + 1
                 st.rerun()
         else:
-            st.info(f"Sincronizza i voti della giornata {matchday} in Voti & dati per avere nomi e ruoli ufficiali.")
+            st.info("Carica le rose complete Diretta.it per avere tutti i nomi e i ruoli della Serie A.")
+            if st.button("Carica rose Serie A", key="roster_sync_squads"):
+                result = sync_diretta_rosters(db, league["season"])
+                if result["ok"]:
+                    st.session_state["roster_feedback"] = f"Rose aggiornate: {result['players']} calciatori in {result['teams']} squadre."
+                    st.rerun()
+                st.error(result["error"])
 
 
 def page_market(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
-    statistics = db.season_statistics(int(league["id"]))
+    statistics = db.complete_player_catalog(int(league["id"]))
     st.title("Mercato & scambi")
     if "market_feedback" in st.session_state:
         st.success(st.session_state.pop("market_feedback"))
@@ -484,7 +500,13 @@ def page_market(db: Database, league: dict) -> None:
     candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
                   and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
     if not candidates:
-        st.info("Sincronizza i voti Gazzetta per confrontare la rosa con calciatori esterni.")
+        st.info("Carica le rose complete Diretta.it per confrontare la rosa con tutti i calciatori esterni.")
+        if st.button("Carica rose Serie A", key="market_sync_squads"):
+            result = sync_diretta_rosters(db, league["season"])
+            if result["ok"]:
+                st.session_state["market_feedback"] = f"Rose aggiornate: {result['players']} calciatori in {result['teams']} squadre."
+                st.rerun()
+            st.error(result["error"])
         return
     st.caption("Confronto tra una tua stima e il rendimento ufficiale osservato del giocatore in entrata.")
     st.markdown('<div class="subhead">Se confermi, lo scambio aggiorna la rosa e il registro movimenti in un’unica operazione.</div>', unsafe_allow_html=True)
@@ -522,6 +544,8 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
     st.caption(f"{league['season']} · Giornata {matchday} · {league['vote_provider']} / {league['vote_edition']}")
     if "import_feedback" in st.session_state:
         st.success(st.session_state.pop("import_feedback"))
+    if "squad_feedback" in st.session_state:
+        st.success(st.session_state.pop("squad_feedback"))
     if latest:
         label, css = status_label(latest)
         st.markdown(f'<div class="source-card"><div><b>{html.escape(str(latest["source_name"]))}</b><br><small>Provider dichiarato</small></div><div><b class="status-{css}">{label}</b><br><small>Stato dati</small></div><div><b>{latest["rows_received"]}</b><br><small>Record ricevuti</small></div><div><b>{fmt_time(latest["checked_at"])}</b><br><small>Ultimo tentativo / acquisizione</small></div></div>', unsafe_allow_html=True)
@@ -580,6 +604,27 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
         with st.expander("Worker indipendente e accesso lega"):
             st.code("python3 -m fantaoperator.updater --watch",language="bash")
             st.info("Worker disponibile, non installato come servizio. Rose e formazioni private non collegate: servono sessione autorizzata e verifica del formato della lega.")
+    st.markdown("### Rose complete Serie A")
+    squad_sync = db.latest_squad_sync(league["season"], DIRETTA_PROVIDER)
+    squad_left, squad_right = st.columns([2, 1])
+    with squad_left:
+        st.caption("Diretta.it fornisce squadre, nomi completi e ruoli per asta e mercato. Gazzetta resta l'unica fonte dei voti ufficiali.")
+        st.link_button("Apri le rose su Diretta.it", DIRETTA_ROSTERS_URL, width="stretch")
+    with squad_right:
+        if squad_sync and squad_sync["status"] == "OK":
+            st.metric("Calciatori nel catalogo", squad_sync["players"])
+            st.caption(f"{squad_sync['teams']} squadre · articolo aggiornato {fmt_time(squad_sync['article_updated_at'])}")
+        elif squad_sync:
+            st.error(squad_sync["error"])
+        else:
+            st.info("Catalogo non ancora caricato")
+        if st.button("↻ Aggiorna rose Diretta.it", width="stretch"):
+            result = sync_diretta_rosters(db, league["season"])
+            if result["ok"]:
+                duplicate_note = f" · {len(result['warnings'])} duplicati rimossi" if result["warnings"] else ""
+                st.session_state["squad_feedback"] = f"Catalogo aggiornato: {result['players']} calciatori, {result['teams']} squadre{duplicate_note}."
+                st.rerun()
+            st.error(result["error"])
     records=db.records(int(league["id"]),matchday)
     st.markdown(f"### Giornata {matchday}")
     if records:

@@ -10,6 +10,7 @@ from typing import Any, Iterable, Iterator, Mapping
 
 from .engine import ScoringRules
 from .vote_store import VoteStore
+from .squad_store import SquadStore
 from .official_votes import season_name
 from .workspace import WorkspaceStore, validate_league
 
@@ -25,7 +26,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-class Database(VoteStore, WorkspaceStore):
+class Database(VoteStore, SquadStore, WorkspaceStore):
     def __init__(self, path: str | Path | None = None) -> None:
         configured = path or os.getenv("FANTAOPERATOR_DB")
         self.path = Path(configured or Path(__file__).resolve().parents[1] / "data" / "fantaoperator.db")
@@ -129,6 +130,7 @@ class Database(VoteStore, WorkspaceStore):
                 """
             )
             self.initialize_votes(db)
+            self.initialize_squads(db)
             self.initialize_workspace(db)
             league_columns = {row["name"] for row in db.execute("PRAGMA table_info(leagues)")}
             for column, definition in (("bench_size", "INTEGER NOT NULL DEFAULT 7"),

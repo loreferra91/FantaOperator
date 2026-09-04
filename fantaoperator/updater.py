@@ -47,6 +47,7 @@ def _import_votes(db, league, matchday, payload, filename, content_type="", *,
         payload_hash=payload_hash(payload), default_status=default_status,
         provenance="FEED_CONFIGURATO" if remote else "IMPORT_LOCALE", expected_context=context(league),
         expected_source_url=league["source_url"] if remote else None)
+    db.link_roster_to_votes(league["id"])
     return {**result, "warnings": batch.warnings}
 
 
@@ -73,6 +74,7 @@ def refresh_votes(db, league, matchday):
                     payload_hash=payload_hash(payload), default_status="PROVVISORIO",
                     provenance="PAGINA_UFFICIALE", expected_context=context(league),
                     expected_source_url=league["source_url"])
+                db.link_roster_to_votes(league["id"])
                 return {"ok": True, **result, "warnings": batch.warnings}
             if is_public_votes_url(url):
                 url = public_votes_url(league["season"], matchday)
@@ -86,6 +88,7 @@ def refresh_votes(db, league, matchday):
                     payload_hash=payload_hash(payload), default_status="PROVVISORIO",
                     provenance="PAGINA_UFFICIALE", expected_context=context(league),
                     expected_source_url=league["source_url"])
+                db.link_roster_to_votes(league["id"])
                 return {"ok": True, **result, "warnings": batch.warnings}
             payload, mime, final_url = fetch_url(url)
             result = _import_votes(db, league, matchday, payload, final_url, mime, source_url=final_url, remote=True)

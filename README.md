@@ -8,8 +8,8 @@ deterministico; non richiede chiavi AI.
 
 1. In **Impostazioni** inserisci nome della lega, budget, stagione, giornata, panchina,
    limite sostituzioni, bonus/malus ed eventuale modificatore difesa.
-2. In **Voti & dati** collega la fonte Gazzetta e sincronizza la giornata.
-3. In **Rosa** importa il CSV della tua squadra o aggiungi i calciatori dai voti scaricati.
+2. In **Voti & dati** carica le rose Diretta.it, collega la fonte Gazzetta e sincronizza la giornata.
+3. In **Rosa** importa il CSV della tua squadra o aggiungi i calciatori dal catalogo Serie A.
 4. In **Formazione** salva titolari e panchina nell'ordine di ingresso.
 5. Usa **Asta live** e **Mercato** per registrare acquisti, cessioni e scambi.
 
@@ -39,6 +39,20 @@ Sono supportati anche import XLSX, CSV e JSON con controllo di provider, redazio
 e giornata. La vecchia fonte pubblica Fantacalcio.it rimane disponibile configurandola
 esplicitamente.
 
+## Rose complete Diretta.it
+
+Squadre, nomi completi e ruoli provengono dall'articolo pubblico
+[Serie A 2026/27, tutte le rose complete](https://www.diretta.it/news/calcio-serie-a-serie-a-2026-27-tutte-le-rose-complete-le-20-squadre-divise-per-ruolo/8UPVU78M/).
+L'import accetta soltanto quell'URL HTTPS, verifica titolo, stagione, data di aggiornamento,
+le 20 squadre e i quattro ruoli per ciascuna squadra, quindi sostituisce il catalogo in una
+singola transazione. Alla verifica del 4 settembre 2026 contiene 589 calciatori unici; due
+ripetizioni presenti nell'articolo vengono eliminate e segnalate nel risultato della sincronizzazione.
+
+Il catalogo alimenta **Rosa**, **Asta live** e **Mercato** anche prima che un calciatore riceva
+un voto. Quando è disponibile una giornata Gazzetta, l'app abbina il nome completo all'ID
+Gazzetta soltanto se squadra e nome rendono il collegamento univoco. I calciatori non abbinati
+restano nel catalogo senza statistiche, invece di ricevere dati appartenenti a un omonimo.
+
 ## Formazioni e punteggio
 
 Il motore valuta tutti i moduli Classic ammessi, salva uno snapshot dei titolari e della
@@ -52,7 +66,7 @@ ma il modificatore è disattivato finché l'utente non lo abilita.
 
 ## Asta, mercato e backup
 
-La War Room usa i calciatori ufficiali non ancora posseduti, il budget residuo reale e una
+La War Room usa i calciatori del catalogo completo non ancora posseduti, il budget residuo reale e una
 valutazione inserita dall'utente. Un acquisto confermato entra subito nella rosa. Cessioni e
 scambi aggiornano rosa e registro movimenti in una singola transazione SQLite; un errore di
 budget non lascia modifiche parziali.
