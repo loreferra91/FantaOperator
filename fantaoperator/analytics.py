@@ -1,9 +1,9 @@
 """Season aggregates derived only from imported official vote records."""
 from __future__ import annotations
 
-from collections import defaultdict
 import re
 import unicodedata
+from collections import defaultdict
 
 
 def normalized_name(value):
@@ -39,7 +39,7 @@ def _stat_candidates(directory_row, statistics):
 
 
 def merge_player_catalog(directory, statistics):
-    """Join Diretta full names with abbreviated Gazzetta identities only when unique."""
+    """Merge the directory and vote feeds without discarding either source."""
     directory, statistics = [dict(row) for row in directory], [dict(row) for row in statistics]
     if not directory:
         return sorted(({**row, "directory_provider": ""} for row in statistics),
@@ -47,9 +47,11 @@ def merge_player_catalog(directory, statistics):
     result = []
     candidate_lists = [_stat_candidates(player, statistics) for player in directory]
     candidate_counts = defaultdict(int)
+    referenced_statistics = set()
     for matches in candidate_lists:
         for stat in matches:
             candidate_counts[id(stat)] += 1
+            referenced_statistics.add(id(stat))
     for player, matches in zip(directory, candidate_lists):
         row = {**player, "directory_provider": player.get("provider", "Diretta.it")}
         if len(matches) == 1 and candidate_counts[id(matches[0])] == 1:
@@ -62,6 +64,11 @@ def merge_player_catalog(directory, statistics):
                         "provider_average_fantavote": None, "recent_average_fantavote": None,
                         "trend": 0, "goals": 0, "assists": 0, "yellow_cards": 0, "red_cards": 0})
         result.append(row)
+    # A newly transferred player can appear in the vote feed before the public
+    # directory is updated. Keep that stable provider identity available rather
+    # than making the player disappear from auction and market screens.
+    result.extend({**stat, "directory_provider": ""} for stat in statistics
+                  if id(stat) not in referenced_statistics)
     return sorted(result, key=lambda row: (normalized_name(row.get("team")), row.get("role", ""), normalized_name(row.get("name"))))
 
 

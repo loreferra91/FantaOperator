@@ -2,11 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from fantaoperator.analytics import merge_player_catalog
 from fantaoperator.database import Database
 from fantaoperator.diretta_rosters import (
-    DIRETTA_ROSTERS_URL, EXPECTED_TEAMS, PROVIDER, is_diretta_rosters_url, parse_diretta_rosters,
+    DIRETTA_ROSTERS_URL,
+    EXPECTED_TEAMS,
+    PROVIDER,
+    is_diretta_rosters_url,
+    parse_diretta_rosters,
 )
-from fantaoperator.analytics import merge_player_catalog
 
 
 def article(*, omit_team=None, omit_role=None, title="Serie A 2026/27, tutte le rose complete: le 20 squadre divise per ruolo"):
@@ -90,6 +94,25 @@ class DirettaRosterTests(unittest.TestCase):
         stat = {"name": "Rossi M.", "team": "Roma", "role": "CEN", "vote_provider": "Gazzetta", "provider_player_id": "1"}
         merged = merge_player_catalog(directory, [stat])
         self.assertTrue(all(not row["provider_player_id"] for row in merged))
+
+    def test_vote_player_missing_from_directory_remains_available(self):
+        directory = [
+            {"name": "Mario Rossi", "team": "Roma", "role": "CEN", "provider": PROVIDER},
+        ]
+        statistics = [
+            {"name": "Rossi M.", "team": "Roma", "role": "CEN", "vote_provider": "Gazzetta",
+             "provider_player_id": "1"},
+            {"name": "Nuovo N.", "team": "Roma", "role": "ATT", "vote_provider": "Gazzetta",
+             "provider_player_id": "2"},
+        ]
+
+        merged = merge_player_catalog(directory, statistics)
+
+        self.assertEqual(len(merged), 2)
+        by_id = {row.get("provider_player_id"): row for row in merged}
+        self.assertEqual(by_id["1"]["name"], "Mario Rossi")
+        self.assertEqual(by_id["2"]["name"], "Nuovo N.")
+        self.assertEqual(by_id["2"]["directory_provider"], "")
 
 
 if __name__ == "__main__":
