@@ -15,6 +15,57 @@ def normalized_name(value):
     return " ".join(re.findall(r"[a-z0-9]+", value))
 
 
+def compatible_names(full_name, short_name):
+    """Recognize a full name or a provider's surname / surname-initial alias."""
+    full, short = normalized_name(full_name), normalized_name(short_name)
+    if not full or not short:
+        return False
+    if full == short:
+        return True
+    parts = short.split()
+    if len(parts) == 1:
+        return full.endswith(" " + short)
+    if len(parts[-1]) == 1:
+        surname = " ".join(parts[:-1])
+        return full == surname or (full.endswith(" " + surname) and full.split()[0].startswith(parts[-1]))
+    return False
+
+
+def player_identity(player):
+    provider = player.get("vote_provider") or player.get("source_name")
+    player_id = player.get("provider_player_id")
+    return (provider, player_id) if provider and player_id else None
+
+
+def possible_duplicate(left, right):
+    """Reject uncertain aliases too; never assign votes using this predicate."""
+    left_id, right_id = player_identity(left), player_identity(right)
+    if left_id and right_id:
+        return left_id == right_id
+    return (compatible_names(left.get("name"), right.get("name"))
+            or compatible_names(right.get("name"), left.get("name")))
+
+
+def resolve_player_identities(players, catalog):
+    """Enrich snapshots without changing names, roles, teams or user estimates."""
+    by_identity = defaultdict(set)
+    for row in catalog:
+        identity = player_identity(row)
+        if identity:
+            key = (normalized_name(row.get("name")), normalized_name(row.get("team")), row.get("role"))
+            by_identity[key].add(identity)
+    result = []
+    for player in players:
+        row = dict(player)
+        if not row.get("provider_player_id"):
+            key = (normalized_name(row.get("name")), normalized_name(row.get("team")), row.get("role"))
+            matches = by_identity.get(key, set())
+            if len(matches) == 1:
+                row["vote_provider"], row["provider_player_id"] = next(iter(matches))
+        result.append(row)
+    return result
+
+
 def _stat_candidates(directory_row, statistics):
     team = normalized_name(directory_row.get("team"))
     full = normalized_name(directory_row.get("name"))
@@ -22,19 +73,8 @@ def _stat_candidates(directory_row, statistics):
     for stat in statistics:
         if normalized_name(stat.get("team")) != team:
             continue
-        short = normalized_name(stat.get("name"))
-        if short == full:
+        if compatible_names(full, stat.get("name")):
             result.append(stat)
-            continue
-        parts = short.split()
-        if len(parts) == 1 and (full == short or full.endswith(" " + short)):
-            result.append(stat)
-            continue
-        if len(parts) >= 2 and len(parts[-1]) == 1:
-            surname = " ".join(parts[:-1])
-            full_parts = full.split()
-            if full == surname or (full.endswith(" " + surname) and full_parts[0].startswith(parts[-1])):
-                result.append(stat)
     return result
 
 
@@ -53,6 +93,13 @@ def merge_player_catalog(directory, statistics):
             candidate_counts[id(stat)] += 1
             referenced_statistics.add(id(stat))
     for player, matches in zip(directory, candidate_lists):
+        # A vote-only identity at another club may be this directory entry after
+        # a transfer. Suppress the uncertain directory offer, but do not attach
+        # that player's votes or ID without evidence from the same team.
+        if not matches and any(id(stat) not in referenced_statistics
+                               and player_identity(stat) and possible_duplicate(player, stat)
+                               for stat in statistics):
+            continue
         row = {**player, "directory_provider": player.get("provider", "Diretta.it")}
         if len(matches) == 1 and candidate_counts[id(matches[0])] == 1:
             stat = matches[0]

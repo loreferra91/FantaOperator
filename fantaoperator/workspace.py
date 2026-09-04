@@ -8,6 +8,7 @@ import math
 import re
 from datetime import datetime, timezone
 
+from .analytics import possible_duplicate, resolve_player_identities
 from .engine import FORMATION_LIMITS, ScoringRules
 from .official_votes import season_name
 from .sources import MAX_PAYLOAD, load_json
@@ -63,6 +64,8 @@ def validate_roster(rows):
             if not math.isfinite(value) or not low <= value <= high or (key != "expected" and not value.is_integer()):
                 raise ValueError(f"{item['name']}: {key} fuori intervallo ({low}–{high}).")
             item[key] = value if key == "expected" else int(value)
+        if any(possible_duplicate(item, previous) for previous in result):
+            raise ValueError("Possibile giocatore duplicato: verifica nome completo e identificativo della fonte.")
         result.append({key: item[key] for key in (*PLAYER_FIELDS, "purchase_cost")})
     return result
 
@@ -235,6 +238,10 @@ class WorkspaceStore:
         result = dict(row)
         result["players"] = json.loads(result.pop("players_json"))
         result["bench"] = json.loads(result.pop("bench_json", "[]"))
+        # Repair reads of pre-existing snapshots even before the next sync.
+        catalog = self.complete_player_catalog(league_id)
+        for field in ("players", "bench"):
+            result[field] = resolve_player_identities(result[field], catalog)
         return result
 
     def transactions(self, league_id, limit=200):
@@ -262,8 +269,8 @@ class WorkspaceStore:
                 raise ValueError("Budget insufficiente per registrare l'acquisto.")
             current = [dict(r) for r in db.execute("""SELECT p.*,r.purchase_cost FROM roster r JOIN players p ON p.id=r.player_id
                 WHERE r.league_id=? AND r.owned=1""", (league_id,))]
-            if any(p["name"].casefold() == row["name"].casefold() for p in current):
-                raise ValueError("Il giocatore è già in rosa.")
+            if any(p["name"].casefold() == row["name"].casefold() or possible_duplicate(p, row) for p in current):
+                raise ValueError("Il giocatore è già in rosa o ha un nome compatibile: verifica l'identificativo della fonte.")
             self._upsert_owned_locked(db, league_id, row)
             db.execute("""INSERT INTO roster_transactions
                 (league_id,kind,player_name,role,team,amount,counterparty,note,created_at)
@@ -297,11 +304,11 @@ class WorkspaceStore:
                 WHERE r.league_id=? AND r.player_id=? AND r.owned=1""", (league_id, outgoing_id)).fetchone()
             if outgoing is None:
                 raise ValueError("Il giocatore ceduto non è più in rosa.")
-            if incoming_row["name"].casefold() != outgoing["name"].casefold():
-                duplicate = db.execute("""SELECT 1 FROM roster r JOIN players p ON p.id=r.player_id
-                    WHERE r.league_id=? AND r.owned=1 AND p.name=? COLLATE NOCASE""", (league_id, incoming_row["name"])).fetchone()
-                if duplicate:
-                    raise ValueError("Il giocatore ricevuto è già in rosa.")
+            current = [dict(row) for row in db.execute("""SELECT p.* FROM roster r JOIN players p ON p.id=r.player_id
+                WHERE r.league_id=? AND r.owned=1""", (league_id,))]
+            if any(p["name"].casefold() == incoming_row["name"].casefold() or possible_duplicate(p, incoming_row)
+                   for p in current):
+                raise ValueError("Il giocatore ricevuto è già in rosa o ha un nome compatibile: verifica l'identificativo della fonte.")
             spent = db.execute("SELECT COALESCE(SUM(purchase_cost),0) FROM roster WHERE league_id=? AND owned=1", (league_id,)).fetchone()[0]
             adjustments = db.execute("SELECT COALESCE(SUM(budget_delta),0) FROM roster_transactions WHERE league_id=?", (league_id,)).fetchone()[0]
             if spent - int(outgoing["purchase_cost"]) + incoming_row["purchase_cost"] > int(league["budget"]) + adjustments:
@@ -326,6 +333,8 @@ class WorkspaceStore:
             (league_id, player_id, row["purchase_cost"]))
 
     def export_workspace(self, league_id):
+        league = self.league(league_id)
+        catalog = self.complete_player_catalog(league_id)
         with self.connect() as db:
             lineups = [dict(row) for row in db.execute("SELECT season,matchday,formation,players_json,bench_json,saved_at FROM saved_lineups WHERE league_id=?", (league_id,))]
             transactions = [dict(row) for row in db.execute("""SELECT kind,player_name,role,team,amount,counterparty,note,created_at,budget_delta
@@ -334,7 +343,10 @@ class WorkspaceStore:
         for row in lineups:
             row["players"] = json.loads(row.pop("players_json"))
             row["bench"] = json.loads(row.pop("bench_json"))
-        data = {"format": "fantaoperator-workspace", "version": 2, "league": self.league(league_id),
+            if row["season"] == league["season"]:
+                for field in ("players", "bench"):
+                    row[field] = resolve_player_identities(row[field], catalog)
+        data = {"format": "fantaoperator-workspace", "version": 2, "league": league,
                 "roster": self.roster(league_id), "lineups": lineups,
                 "transactions": transactions, "assistant_messages": messages}
         # Feed credentials are not included in portable files; public vote URLs are safe.

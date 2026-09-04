@@ -53,11 +53,21 @@ un voto. Quando è disponibile una giornata Gazzetta, l'app abbina il nome compl
 Gazzetta soltanto se squadra e nome rendono il collegamento univoco. I calciatori non abbinati
 restano nel catalogo senza statistiche, invece di ricevere dati appartenenti a un omonimo.
 
+Se un nome abbreviato nei voti è compatibile con un calciatore Diretta di un'altra squadra,
+l'offerta Diretta potenzialmente duplicata viene nascosta e resta disponibile quella della
+fonte voti. La somiglianza del nome non viene usata per attribuire voti o ID tra squadre diverse.
+Acquisti, scambi e import della rosa rifiutano anche possibili duplicati tra nome completo e
+abbreviato; per distinguere omonimi occorrono nomi completi distinti o ID verificati distinti.
+
 ## Formazioni e punteggio
 
 Il motore valuta tutti i moduli Classic ammessi, salva uno snapshot dei titolari e della
 panchina e applica sostituzioni in ordine, ruolo per ruolo, fino al limite configurato.
 Non inventa un voto per chi rimane senza punteggio.
+
+Quando arrivano i voti, gli ID verificati vengono recuperati anche per titolari e panchinari
+delle formazioni già salvate, compresi i giocatori nel frattempo ceduti. Nomi, ruoli, ordine,
+stime e data della conferma restano quelli dello snapshot; il backup conserva gli ID recuperati.
 
 Il modificatore difesa è facoltativo e completamente configurabile. Con almeno quattro
 difensori usa il voto base del portiere e dei tre migliori difensori entrati a voto, poi

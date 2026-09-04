@@ -12,6 +12,27 @@ from fixtures import complete_roster
 
 
 class AppNavigationTests(unittest.TestCase):
+    def test_owned_full_name_hides_transferred_alias_in_all_purchase_pages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "transfer.db"
+            db = Database(path)
+            configure_preferred_source(db)
+            db.replace_roster(1, [{"name": "Mario Rossi", "team": "Roma", "role": "ATT"}])
+            db.import_records(1, 2, [
+                {"player": "Rossi M.", "team": "Milan", "role": "ATT", "vote": 7, "provider_player_id": "42"},
+                {"player": "Disponibile", "team": "Milan", "role": "CEN", "vote": 6, "provider_player_id": "99"},
+            ], source_name="Gazzetta", source_url="", payload_hash="transfer", default_status="PROVVISORIO")
+            with patch.dict("os.environ", {"FANTAOPERATOR_DB": str(path)}):
+                app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
+                for page, label in (("♙  Rosa", "Giocatore disponibile"),
+                                    ("⚒  Asta live", "Giocatore sul tavolo"),
+                                    ("↗  Mercato", "Ricevi")):
+                    app.sidebar.radio[0].set_value(page).run()
+                    self.assertEqual(len(app.exception), 0, page)
+                    options = next(s for s in app.selectbox if s.label == label).options
+                    self.assertTrue(any("Disponibile" in value for value in options), page)
+                    self.assertFalse(any("Rossi" in value for value in options), page)
+
     def test_selected_day_drives_sidebar_and_roster_candidates(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "day.db"
@@ -26,7 +47,7 @@ class AppNavigationTests(unittest.TestCase):
                 app.sidebar.radio[0].set_value("♙  Rosa").run()
                 self.assertEqual(len(app.exception), 0)
                 candidates = next(s for s in app.selectbox if s.label == "Giocatore disponibile")
-                self.assertEqual(candidates.options, ["Test candidato · "])
+                self.assertEqual(candidates.options, ["Test candidato · POR · "])
 
     def test_every_page_handles_empty_roster(self):
         with tempfile.TemporaryDirectory() as directory:

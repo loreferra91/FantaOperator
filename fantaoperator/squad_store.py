@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
-from .analytics import merge_player_catalog
+from .analytics import merge_player_catalog, resolve_player_identities
 from .official_votes import season_name
 from .sources import safe_url
 
@@ -97,25 +97,30 @@ class SquadStore:
         return merge_player_catalog(self.catalog_players(league["season"]), self.season_statistics(league_id))
 
     def link_roster_to_votes(self, league_id):
-        """Attach Gazzetta stable IDs to full-name Diretta players when unambiguous."""
-        catalog = self.complete_player_catalog(league_id)
+        """Backfill verified IDs in the roster and current-season lineup snapshots."""
         linked = 0
-        from .analytics import normalized_name
-        by_identity = {}
-        for row in catalog:
-            if row.get("provider_player_id"):
-                key = (normalized_name(row["name"]), normalized_name(row.get("team", "")), row.get("role"))
-                by_identity.setdefault(key, []).append(row)
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            league = self.league(league_id)
+            catalog = self.complete_player_catalog(league_id)
             players = db.execute("""SELECT p.id,p.name,p.team,p.role,p.provider_player_id FROM roster r
                 JOIN players p ON p.id=r.player_id WHERE r.league_id=? AND r.owned=1""", (league_id,)).fetchall()
-            for player in players:
-                if player["provider_player_id"]:
-                    continue
-                key = (normalized_name(player["name"]), normalized_name(player["team"]), player["role"])
-                matches = by_identity.get(key, [])
-                if len(matches) == 1:
+            for original, player in zip(players, resolve_player_identities(players, catalog)):
+                if not original["provider_player_id"] and player.get("provider_player_id"):
                     db.execute("UPDATE players SET vote_provider=?,provider_player_id=? WHERE id=?",
-                               (matches[0]["vote_provider"], matches[0]["provider_player_id"], player["id"]))
+                               (player["vote_provider"], player["provider_player_id"], player["id"]))
                     linked += 1
+            snapshots = db.execute("""SELECT matchday,players_json,bench_json FROM saved_lineups
+                WHERE league_id=? AND season=?""", (league_id, league["season"])).fetchall()
+            for snapshot in snapshots:
+                fields = {}
+                for field in ("players_json", "bench_json"):
+                    original = json.loads(snapshot[field])
+                    resolved = resolve_player_identities(original, catalog)
+                    if resolved != original:
+                        fields[field] = json.dumps(resolved, ensure_ascii=False)
+                if fields:
+                    db.execute(f"UPDATE saved_lineups SET {','.join(f'{key}=?' for key in fields)} "
+                               "WHERE league_id=? AND season=? AND matchday=?",
+                               (*fields.values(), league_id, league["season"], snapshot["matchday"]))
         return linked

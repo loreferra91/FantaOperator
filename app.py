@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
+from fantaoperator.analytics import possible_duplicate
 from fantaoperator.assistant import respond
 from fantaoperator.database import Database
 from fantaoperator.engine import FORMATION_LIMITS, compare_players, optimize_bench, optimize_lineup, player_score
@@ -307,10 +308,7 @@ def page_auction(db: Database, league: dict) -> None:
     st.caption("Acquisti registrati nella rosa e nel registro movimenti. Il prezzo obiettivo resta una tua valutazione.")
     if "auction_feedback" in st.session_state:
         st.success(st.session_state.pop("auction_feedback"))
-    owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
-    owned_names = {p["name"].casefold() for p in roster}
-    candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
-                  and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
+    candidates = [p for p in statistics if not any(possible_duplicate(p, owned) for owned in roster)]
     if not candidates:
         st.info("Carica le rose complete Diretta.it per mostrare tutti i calciatori della Serie A.")
         if st.button("Carica rose Serie A", key="auction_sync_squads"):
@@ -458,14 +456,12 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
     with st.expander("Aggiungi un giocatore dal catalogo Serie A"):
         records = db.complete_player_catalog(int(league["id"]))
         owned = {p["name"].casefold() for p in roster}
-        owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
-        candidates = [r for r in records if (r.get("vote_provider"),r.get("provider_player_id")) not in owned_ids
-                      and (r.get("provider_player_id") or r["name"].casefold() not in owned)]
+        candidates = [r for r in records if not any(possible_duplicate(r, player) for player in roster)]
         if candidates:
             teams = sorted({r["team"] for r in candidates}, key=str.casefold)
             selected_team = st.selectbox("Squadra", teams)
             team_candidates = [r for r in candidates if r["team"] == selected_team]
-            names = {f"{r['name']} · {r['team']}": r for r in team_candidates}
+            names = {f"{r['name']} · {r['role']} · {r['team']}": r for r in team_candidates}
             chosen = st.selectbox("Giocatore disponibile", list(names))
             cost = st.number_input("Costo d'acquisto", 0, 5000, 1)
             if st.button("Aggiungi alla rosa"):
@@ -495,10 +491,7 @@ def page_market(db: Database, league: dict) -> None:
     if not roster:
         st.info("Inserisci la tua rosa prima di valutare uno scambio.")
         return
-    owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
-    owned_names = {p["name"].casefold() for p in roster}
-    candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
-                  and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
+    candidates = [p for p in statistics if not any(possible_duplicate(p, owned) for owned in roster)]
     if not candidates:
         st.info("Carica le rose complete Diretta.it per confrontare la rosa con tutti i calciatori esterni.")
         if st.button("Carica rose Serie A", key="market_sync_squads"):
@@ -600,10 +593,23 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
         template={"schema_version":1,"provider":league["vote_provider"],"edition":league["vote_edition"],"season":league["season"],"matchday":matchday,
                   "records":[{"player":"Esempio Giocatore","vote":6.5,"status":"PROVVISORIO","goals":1,"penalties_scored":0,"penalties_missed":0}]}
         st.download_button("Scarica schema JSON collector",json.dumps(template,ensure_ascii=False,indent=2),"schema-voti.json","application/json",width="stretch")
-        st.caption("Con la pagina aperta: controllo ogni 30 secondi, download all’intervallo scelto. A browser chiuso serve il worker avviato separatamente.")
-        with st.expander("Worker indipendente e accesso lega"):
-            st.code("python3 -m fantaoperator.updater --watch",language="bash")
-            st.info("Worker disponibile, non installato come servizio. Rose e formazioni private non collegate: servono sessione autorizzata e verifica del formato della lega.")
+        with st.expander("Aggiornamento dei voti"):
+            interval = int(league.get("auto_sync_minutes") or 0)
+            if not league.get("source_url"):
+                st.info("Collega una fonte voti per attivare la sincronizzazione.")
+            elif interval:
+                st.write(f"Aggiornamento automatico ogni {interval} minuti mentre la sessione è aperta.")
+                st.caption("L’app controlla ogni 30 secondi se è il momento di aggiornare i voti.")
+            else:
+                st.write("Aggiornamento automatico disattivato. Usa «Verifica e sincronizza» per scaricare i voti.")
+            st.caption("Puoi scegliere l’intervallo in Impostazioni → Aggiornamento automatico.")
+            if not os.getenv("FANTAOPERATOR_DB"):
+                st.info("Questa sessione non dispone di aggiornamenti a browser chiuso. Scarica il backup in Impostazioni prima di uscire per conservare rosa e formazioni.")
+            else:
+                st.caption("Per aggiornare anche a browser chiuso, l’installazione locale richiede un processo separato sullo stesso database. Le istruzioni sono nel README del progetto.")
+        with st.expander("Importare la rosa della tua lega"):
+            st.write("Puoi caricare la rosa da un file CSV nella sezione Rosa oppure scegliere i giocatori dal catalogo Serie A.")
+            st.caption("L’importazione diretta dall’area privata della piattaforma di lega non è ancora disponibile.")
     st.markdown("### Rose complete Serie A")
     squad_sync = db.latest_squad_sync(league["season"], DIRETTA_PROVIDER)
     squad_left, squad_right = st.columns([2, 1])
