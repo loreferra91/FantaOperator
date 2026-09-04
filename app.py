@@ -458,13 +458,22 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
         owned = {p["name"].casefold() for p in roster}
         candidates = [r for r in records if not any(possible_duplicate(r, player) for player in roster)]
         if candidates:
-            teams = sorted({r["team"] for r in candidates}, key=str.casefold)
-            selected_team = st.selectbox("Squadra", teams)
-            team_candidates = [r for r in candidates if r["team"] == selected_team]
-            names = {f"{r['name']} · {r['role']} · {r['team']}": r for r in team_candidates}
-            chosen = st.selectbox("Giocatore disponibile", list(names))
+            query = st.text_input("Cerca giocatore", placeholder="Scrivi nome o cognome…",
+                                  help="Cerca in tutte le squadre. Premi Invio per aggiornare i risultati.",
+                                  key="roster_player_search").strip().casefold()
+            if query:
+                visible_candidates = [r for r in candidates if all(part in r["name"].casefold() for part in query.split())]
+            else:
+                teams = ["Tutte le squadre", *sorted({r["team"] for r in candidates}, key=str.casefold)]
+                selected_team = st.selectbox("Squadra", teams)
+                visible_candidates = [r for r in candidates if selected_team == "Tutte le squadre" or r["team"] == selected_team]
+            visible_candidates = sorted(visible_candidates, key=lambda r: r["name"].casefold())
+            names = {f"{r['name']} · {r['role']} · {r['team']}": r for r in visible_candidates}
+            if not names:
+                st.info("Nessun giocatore disponibile trovato. Prova con un altro nome.")
+            chosen = st.selectbox("Giocatore disponibile", list(names), disabled=not names)
             cost = st.number_input("Costo d'acquisto", 0, 5000, 1)
-            if st.button("Aggiungi alla rosa"):
+            if st.button("Aggiungi alla rosa", disabled=not names):
                 row = names[chosen]
                 display_name = row["name"] if row["name"].casefold() not in owned else f"{row['name']} ({row['team']})"
                 db.replace_roster(int(league["id"]), [*roster, {"name": display_name, "role": row["role"], "team": row["team"], "purchase_cost": cost,
