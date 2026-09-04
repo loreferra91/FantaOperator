@@ -14,28 +14,11 @@ from .official_votes import season_name
 from .workspace import WorkspaceStore, validate_league
 
 
-SEED_PLAYERS = [
-    ("Maignan", "POR", "Milan", 6.2, 98, "Basso", 27, "A", 2),
-    ("Provedel", "POR", "Lazio", 5.8, 93, "Basso", 18, "B", -1),
-    ("Bastoni", "DIF", "Inter", 6.0, 95, "Basso", 18, "A", 5),
-    ("Bremer", "DIF", "Juventus", 5.8, 94, "Basso", 16, "A", -2),
-    ("Di Lorenzo", "DIF", "Napoli", 5.9, 92, "Medio", 14, "B", 1),
-    ("Buongiorno", "DIF", "Napoli", 5.9, 89, "Medio", 13, "B", 4),
-    ("Dimarco", "DIF", "Inter", 6.5, 86, "Medio", 25, "A", 8),
-    ("Calafiori", "DIF", "Bologna", 5.9, 82, "Medio", 10, "C", 6),
-    ("Zaccagni", "CEN", "Lazio", 7.1, 88, "Medio", 32, "A", 9),
-    ("Milinković-Savić", "CEN", "Lazio", 7.0, 94, "Basso", 36, "S", 4),
-    ("Barella", "CEN", "Inter", 7.3, 96, "Basso", 38, "S", 7),
-    ("Politano", "CEN", "Napoli", 6.6, 78, "Alto", 19, "B", -3),
-    ("Ricci", "CEN", "Torino", 5.8, 91, "Basso", 12, "C", 13),
-    ("Orsolini", "CEN", "Bologna", 6.2, 84, "Medio", 17, "B", 14),
-    ("Koopmeiners", "ATT", "Juventus", 6.8, 87, "Medio", 48, "A", 6),
-    ("Dybala", "ATT", "Roma", 7.4, 74, "Alto", 69, "S", 3),
-    ("Lautaro", "ATT", "Inter", 8.7, 97, "Basso", 124, "S", 10),
-    ("Lookman", "ATT", "Atalanta", 7.6, 86, "Medio", 26, "A", 18),
-    ("Retegui", "ATT", "Atalanta", 6.9, 88, "Medio", 42, "A", 11),
-    ("Castro", "ATT", "Bologna", 6.3, 79, "Medio", 20, "B", 15),
-]
+LEGACY_DEMO_NAMES = {
+    "Maignan", "Provedel", "Bastoni", "Bremer", "Di Lorenzo", "Buongiorno", "Dimarco", "Calafiori",
+    "Zaccagni", "Milinković-Savić", "Barella", "Politano", "Ricci", "Orsolini", "Koopmeiners", "Dybala",
+    "Lautaro", "Lookman", "Retegui", "Castro",
+}
 
 
 def utc_now() -> str:
@@ -147,32 +130,41 @@ class Database(VoteStore, WorkspaceStore):
             )
             self.initialize_votes(db)
             self.initialize_workspace(db)
+            league_columns = {row["name"] for row in db.execute("PRAGMA table_info(leagues)")}
+            for column, definition in (("bench_size", "INTEGER NOT NULL DEFAULT 7"),
+                                       ("max_substitutions", "INTEGER NOT NULL DEFAULT 3"),
+                                       ("defense_modifier_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                                       ("defense_threshold_low", "REAL NOT NULL DEFAULT 6.0"),
+                                       ("defense_threshold_mid", "REAL NOT NULL DEFAULT 6.5"),
+                                       ("defense_threshold_high", "REAL NOT NULL DEFAULT 7.0"),
+                                       ("defense_bonus_low", "REAL NOT NULL DEFAULT 1.0"),
+                                       ("defense_bonus_mid", "REAL NOT NULL DEFAULT 3.0"),
+                                       ("defense_bonus_high", "REAL NOT NULL DEFAULT 6.0")):
+                if column not in league_columns:
+                    db.execute(f"ALTER TABLE leagues ADD COLUMN {column} {definition}")
             player_columns = {row["name"] for row in db.execute("PRAGMA table_info(players)")}
             for column in ("vote_provider", "provider_player_id"):
                 if column not in player_columns:
                     db.execute(f"ALTER TABLE players ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+            # Early builds inserted this exact obsolete roster. Remove it only when
+            # it is untouched and has no saved work; user-created rosters are kept.
+            demo_rows = db.execute("""SELECT p.name FROM roster r JOIN players p ON p.id=r.player_id
+                WHERE r.league_id=1 AND r.owned=1""").fetchall()
+            has_personal_work = db.execute("SELECT 1 FROM saved_lineups WHERE league_id=1 LIMIT 1").fetchone() or db.execute(
+                "SELECT 1 FROM roster_transactions WHERE league_id=1 LIMIT 1").fetchone()
+            if not has_personal_work and {row[0] for row in demo_rows} == LEGACY_DEMO_NAMES:
+                db.execute("UPDATE roster SET owned=0 WHERE league_id=1")
+                db.execute("UPDATE leagues SET name='La mia lega' WHERE id=1 AND name='Lega degli Otto'")
             count = db.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
             if count == 0:
                 now = utc_now()
                 rules = json.dumps(ScoringRules().as_dict(), ensure_ascii=False)
-                cursor = db.execute(
+                db.execute(
                     """INSERT INTO leagues
                     (name, platform, mode, participants, budget, matchday, vote_provider, scoring_json, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    ("Lega degli Otto", "Fantacalcio.it", "Classic", 8, 500, 3, "Fantacalcio.it", rules, now, now),
+                    ("La mia lega", "Fantacalcio.it", "Classic", 8, 500, 2, "Fantacalcio.it", rules, now, now),
                 )
-                league_id = int(cursor.lastrowid)
-                for player in SEED_PLAYERS:
-                    p = db.execute(
-                        """INSERT INTO players
-                        (name, role, team, expected, start_probability, risk, price, tier, trend)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        player,
-                    )
-                    db.execute(
-                        "INSERT INTO roster (league_id, player_id, purchase_cost, owned) VALUES (?, ?, ?, 1)",
-                        (league_id, int(p.lastrowid), player[6]),
-                    )
 
     def leagues(self) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -191,6 +183,9 @@ class Database(VoteStore, WorkspaceStore):
         allowed = {
             "name", "platform", "mode", "participants", "budget", "matchday",
             "vote_provider", "source_url", "auto_sync_minutes", "season", "vote_edition",
+            "bench_size", "max_substitutions",
+            "defense_modifier_enabled", "defense_threshold_low", "defense_threshold_mid", "defense_threshold_high",
+            "defense_bonus_low", "defense_bonus_mid", "defense_bonus_high",
         }
         fields = validate_league({key: values[key] for key in allowed if key in values})
         if "season" in fields:

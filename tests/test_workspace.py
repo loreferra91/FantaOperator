@@ -6,12 +6,14 @@ from pathlib import Path
 from fantaoperator.database import Database
 from fantaoperator.engine import optimize_lineup, player_score
 from fantaoperator.workspace import lineup_score, parse_roster_csv, roster_csv
+from fixtures import complete_roster
 
 
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp.name) / 'test.db')
+        self.db.replace_roster(1, complete_roster())
 
     def tearDown(self):
         self.temp.cleanup()
@@ -89,6 +91,19 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(backup['league']['source_url'], '')
         self.assertEqual(backup['league']['auto_sync_minutes'], 0)
 
+    def test_version_one_backup_remains_importable(self):
+        data = json.loads(self.db.export_workspace(1))
+        data['version'] = 1
+        data.pop('transactions'); data.pop('assistant_messages')
+        for key in ('bench_size','max_substitutions','defense_modifier_enabled','defense_threshold_low',
+                    'defense_threshold_mid','defense_threshold_high','defense_bonus_low','defense_bonus_mid','defense_bonus_high'):
+            data['league'].pop(key)
+        for lineup in data['lineups']:
+            lineup.pop('bench', None)
+        self.db.replace_roster(1, [])
+        self.db.restore_workspace(1, json.dumps(data).encode())
+        self.assertEqual(len(self.db.roster(1)), 20)
+
     def test_partial_scores_do_not_invent_zeros_or_match_other_team(self):
         selected = [{'name':'A', 'team':'Inter'}, {'name':'B','team':'Milan'}]
         self.assertIsNone(lineup_score(selected, [])['total'])
@@ -101,6 +116,59 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_zero_start_probability_is_not_replaced_by_default(self):
         self.assertEqual(player_score({'expected':6, 'start_probability':0, 'risk':'Basso'}), 0)
+
+    def test_ordered_role_substitutions_respect_limit(self):
+        starters = [{'name':'Titolare D','role':'DIF'}, {'name':'Titolare A','role':'ATT'}]
+        bench = [{'name':'Riserva A','role':'ATT'}, {'name':'Riserva D SV','role':'DIF'}, {'name':'Riserva D','role':'DIF'}]
+        records = [
+            {'name':'Riserva A','team':'','fantavote':8},
+            {'name':'Riserva D SV','team':'','fantavote':None},
+            {'name':'Riserva D','team':'','fantavote':6.5},
+        ]
+        one = lineup_score(starters, records, bench, 1)
+        self.assertEqual(one['total'], 6.5)
+        self.assertEqual(one['substitutions'], [{'out':'Titolare D','in':'Riserva D','role':'DIF'}])
+        self.assertEqual(one['missing'], ['Titolare A'])
+        two = lineup_score(starters, records, bench, 2)
+        self.assertEqual(two['total'], 14.5)
+        self.assertEqual(len(two['substitutions']), 2)
+
+    def test_configurable_defense_modifier_uses_base_votes(self):
+        players = [{'name':'P','role':'POR'}] + [{'name':f'D{i}','role':'DIF'} for i in range(4)]
+        records = [{'name':p['name'],'team':'','official_vote':6.5,'fantavote':6.5} for p in players]
+        rules = {'defense_modifier_enabled':1, 'defense_threshold_low':6, 'defense_bonus_low':1,
+                 'defense_threshold_mid':6.5, 'defense_bonus_mid':3,
+                 'defense_threshold_high':7, 'defense_bonus_high':6}
+        result = lineup_score(players, records, defense_modifier=rules)
+        self.assertEqual(result['defense_average'], 6.5)
+        self.assertEqual(result['defense_modifier'], 3)
+        self.assertEqual(result['total'], 35.5)
+
+    def test_market_operations_are_atomic_and_backed_up(self):
+        self.db.replace_roster(1, [{'name':'Uscita','role':'DIF','purchase_cost':10}])
+        incoming = {'name':'Entrata','role':'ATT','team':'Roma','expected':7,'vote_provider':'Gazzetta','provider_player_id':'99'}
+        self.db.exchange_player(1, self.db.roster(1)[0]['id'], incoming, 12, counterparty='Mario')
+        self.assertEqual([p['name'] for p in self.db.roster(1)], ['Entrata'])
+        self.assertEqual(len(self.db.transactions(1)), 2)
+        with self.assertRaises(ValueError):
+            self.db.acquire_player(1, {'name':'Troppo caro','role':'ATT'}, 5000)
+        self.assertEqual([p['name'] for p in self.db.roster(1)], ['Entrata'])
+        self.db.add_assistant_message(1, 'user', 'memo personale')
+        backup = self.db.export_workspace(1)
+        self.db.release_player(1, self.db.roster(1)[0]['id'])
+        self.db.clear_assistant(1)
+        self.db.restore_workspace(1, backup.encode())
+        self.assertEqual([p['name'] for p in self.db.roster(1)], ['Entrata'])
+        self.assertEqual(len(self.db.transactions(1)), 2)
+        self.assertEqual(self.db.assistant_messages(1)[0]['content'], 'memo personale')
+
+    def test_sale_credits_adjust_real_available_budget(self):
+        self.db.replace_roster(1, [{'name':'Costo dieci','role':'ATT','purchase_cost':10}])
+        self.assertEqual(self.db.available_budget(1), 490)
+        self.db.release_player(1, self.db.roster(1)[0]['id'], 4)
+        self.assertEqual(self.db.available_budget(1), 494)
+        self.db.acquire_player(1, {'name':'Nuovo','role':'ATT'}, 494)
+        self.assertEqual(self.db.available_budget(1), 0)
 
 
 if __name__ == '__main__':

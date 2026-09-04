@@ -126,6 +126,27 @@ def optimize_lineup(
     return best[1], best[2], round(sum(float(p.get("expected", 0) or 0) for p in best[2]), 2)
 
 
+def optimize_bench(
+    players: Iterable[Mapping[str, object]],
+    starters: Iterable[Mapping[str, object]],
+    size: int = 7,
+    strategy: str = "Equilibrato",
+) -> list[dict[str, object]]:
+    """Return an ordered Classic bench, prioritising role coverage then player score."""
+    size = max(0, min(int(size), 15))
+    selected_ids = {p.get("id") for p in starters}
+    available = [dict(p) for p in players if p.get("id") not in selected_ids]
+    available.sort(key=lambda p: player_score(p, strategy), reverse=True)
+    bench: list[dict[str, object]] = []
+    for role in ("POR", "DIF", "CEN", "ATT"):
+        candidate = next((p for p in available if p.get("role") == role), None)
+        if candidate is not None and len(bench) < size:
+            bench.append(candidate)
+            available.remove(candidate)
+    bench.extend(available[: max(0, size - len(bench))])
+    return bench
+
+
 def compare_players(left: Mapping[str, object], right: Mapping[str, object]) -> dict[str, object]:
     left_score = player_score(left)
     right_score = player_score(right)

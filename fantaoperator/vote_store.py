@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from .engine import ScoringRules, calculate_fantavote
 from .official_votes import SCORING_FIELDS, STATUSES, normalize_rows, season_name
 from .sources import safe_url
+from .analytics import season_statistics
 
 
 def now() -> str:
@@ -55,6 +56,17 @@ class VoteStore:
                 league_id=? AND season=? AND provider=? AND edition=? AND matchday=?
                 ORDER BY player_key""", (*context(league), matchday))
             return [json.loads(row[0]) for row in rows]
+
+    def season_records(self, league_id):
+        league = self.league(league_id)
+        with self.connect() as db:
+            rows = db.execute("""SELECT data_json FROM vote_records WHERE
+                league_id=? AND season=? AND provider=? AND edition=?
+                ORDER BY matchday, player_key""", context(league))
+            return [json.loads(row[0]) for row in rows]
+
+    def season_statistics(self, league_id):
+        return season_statistics(self.season_records(league_id))
 
     def latest_sync(self, league_id, matchday=None):
         rows = self.sync_history(league_id, limit=1, matchday=matchday)

@@ -8,6 +8,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 from fantaoperator.database import Database
 from fantaoperator.gazzetta_votes import configure_preferred_source
+from fixtures import complete_roster
 
 
 class AppNavigationTests(unittest.TestCase):
@@ -41,12 +42,13 @@ class AppNavigationTests(unittest.TestCase):
     def test_save_lineup_is_persisted_after_navigation(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "saved.db"
+            Database(path).replace_roster(1, complete_roster())
             with patch.dict("os.environ", {"FANTAOPERATOR_DB": str(path)}):
                 app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
                 next(b for b in app.button if "Ottimizza formazione" in b.label).click().run()
                 next(b for b in app.button if b.label == "Conferma undici").click().run()
                 self.assertEqual(len(app.exception), 0)
-                self.assertEqual(len(Database(path).saved_lineup(1, 3)["players"]), 11)
+                self.assertEqual(len(Database(path).saved_lineup(1, 2)["players"]), 11)
                 app.sidebar.radio[0].set_value("▦  Panoramica").run()
                 self.assertEqual(len(app.exception), 0)
                 self.assertTrue(any("Voti disponibili: 0/11" in c.value for c in app.caption))
@@ -60,8 +62,8 @@ class AppNavigationTests(unittest.TestCase):
             a = first.session_state["workspace_db"]
             b = second.session_state["workspace_db"]
             self.assertNotEqual(a.path, b.path)
-            a.replace_roster(1, [])
-            self.assertEqual(len(b.roster(1)), 20)
+            a.replace_roster(1, [{'name':'Solo prima sessione','role':'POR'}])
+            self.assertEqual(len(b.roster(1)), 0)
             first.run()
             self.assertEqual(first.session_state["workspace_db"].path, a.path)
             self.assertEqual(len(first.exception), 0)

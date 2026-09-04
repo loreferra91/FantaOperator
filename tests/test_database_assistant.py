@@ -6,12 +6,14 @@ from pathlib import Path
 
 from fantaoperator.assistant import answer
 from fantaoperator.database import Database
+from fixtures import complete_roster
 
 
 class DatabaseAssistantTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.db = Database(Path(self.temp.name) / "test.db")
+        self.db.replace_roster(1, complete_roster())
         self.league = self.db.league(1)
 
     def tearDown(self) -> None:
@@ -37,7 +39,7 @@ class DatabaseAssistantTests(unittest.TestCase):
         record = self.db.records(1, 3)[0]
         self.assertEqual(record["fantavote"], 9.5)
         self.assertEqual(record["status"], "DEFINITIVO")
-        self.assertEqual(self.db.latest_sync(1)["payload_hash"], "hash-2")
+        self.assertEqual(self.db.latest_sync(1, 3)["payload_hash"], "hash-2")
 
     def test_rule_change_recalculates_existing_records(self) -> None:
         self.db.import_records(

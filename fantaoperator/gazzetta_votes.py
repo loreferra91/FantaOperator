@@ -124,7 +124,7 @@ def parse_gazzetta_votes(payload: bytes, *, source_url: str, provider: str,
     return VoteBatch(normalize_rows(records), (
         "Voti e fantavoti pubblicati da La Gazzetta dello Sport. Consolidamento non attestato: stato PROVVISORIO.",
         "FV Gazzetta conservato separatamente dal fantavoto ricalcolato con il regolamento della lega.",
-        "Clean sheet non esplicito: nessuna deduzione dal fantavoto pubblicato. S.V., sostituzioni e modificatori non applicati automaticamente.",
+        "Clean sheet non esplicito: nessuna deduzione dal fantavoto pubblicato. Gli S.V. restano senza punteggio; sostituzioni e modificatore si applicano solo alla formazione salvata con le regole della lega.",
     ))
 
 

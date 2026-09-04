@@ -13,7 +13,7 @@ import streamlit as st
 
 from fantaoperator.assistant import respond
 from fantaoperator.database import Database
-from fantaoperator.engine import FORMATION_LIMITS, compare_players, optimize_lineup, player_score
+from fantaoperator.engine import FORMATION_LIMITS, compare_players, optimize_bench, optimize_lineup, player_score
 from fantaoperator.workspace import PLAYER_FIELDS, lineup_score, parse_roster_csv, roster_csv
 from fantaoperator.sources import csv_template, safe_url
 from fantaoperator.official_votes import EDITIONS
@@ -186,15 +186,24 @@ def page_overview(db: Database, league: dict, matchday: int, latest: dict | None
         st.button("◎ Ottimizza formazione", width="stretch", type="primary",
                   on_click=navigate, args=("▥  Formazione",))
     saved = db.saved_lineup(int(league["id"]), matchday)
-    tally = lineup_score(saved["players"] if saved else [], records)
+    tally = lineup_score(saved["players"] if saved else [], records,
+                         saved.get("bench", []) if saved else [], int(league.get("max_substitutions", 3)), league)
     confidence = round(sum(int(p["start_probability"]) for p in selected) / max(len(selected), 1))
     risk_count = len([p for p in selected if p["risk"] == "Alto"])
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Titolarità media stimata", f"{confidence}%")
     m2.metric("Fantapunti attesi", f"{expected:.1f}")
-    m3.metric("Punti undici salvato" if tally["complete"] else "Punti parziali undici salvato", f"{tally['total']:.1f}" if tally["total"] is not None else "—")
+    m3.metric("Punti formazione" if tally["complete"] else "Punti parziali formazione", f"{tally['total']:.1f}" if tally["total"] is not None else "—")
     m4.metric("Rischio undici", "ALTO" if risk_count >= 3 else "MEDIO" if risk_count else "BASSO")
-    st.caption(f"Voti disponibili: {tally['count']}/11. Somma individuale, prima di sostituzioni e modificatori." if saved else "Salva la formazione della giornata per seguirne il punteggio.")
+    if saved:
+        detail = f"Voti disponibili: {tally['count']}/11 · sostituzioni applicate: {len(tally['substitutions'])}/{league.get('max_substitutions', 3)}."
+        if tally["substitutions"]:
+            detail += " " + "; ".join(f"{item['out']} → {item['in']}" for item in tally["substitutions"])
+        if tally["defense_modifier"]:
+            detail += f" Modificatore difesa: +{tally['defense_modifier']:g} (media {tally['defense_average']:.2f})."
+        st.caption(detail)
+    else:
+        st.caption("Salva la formazione della giornata per seguirne il punteggio.")
     if league["mode"] != "Classic":
         st.warning("Ottimizzazione Classic: i ruoli e i moduli Mantra non sono ancora supportati.")
         return
@@ -239,15 +248,18 @@ def page_lineup(db: Database, league: dict, matchday: int) -> None:
     with controls:
         strategy = st.radio("Profilo strategico", ["Equilibrato", "Difendi il vantaggio", "Cerca il bonus"])
         formation, selected, total = optimize_lineup(roster, strategy)
+        bench = optimize_bench(roster, selected, int(league.get("bench_size", 7)), strategy)
         st.markdown(f'<div class="decision-box"><h3>Verdetto</h3><div class="verdict">{formation} · {strategy}</div><p>{total:.1f} fantapunti attesi. Il risultato viene ricalcolato dai dati persistiti della rosa.</p></div>', unsafe_allow_html=True)
         if st.button("Conferma undici", width="stretch", disabled=len(selected) != 11):
-            db.save_lineup(int(league["id"]), matchday, formation, [p["id"] for p in selected])
-            st.success(f"Formazione {formation} salvata per la giornata {matchday}.")
+            db.save_lineup(int(league["id"]), matchday, formation, [p["id"] for p in selected], [p["id"] for p in bench])
+            st.success(f"Formazione {formation} e panchina salvate per la giornata {matchday}.")
     with result:
         if selected:
             st.markdown(pitch_html(selected), unsafe_allow_html=True)
         else:
             st.warning("Completa la rosa per generare un undici valido.")
+        if bench:
+            st.caption("Panchina consigliata, in ordine: " + " · ".join(f"{p['name']} ({p['role']})" for p in bench))
     st.markdown("### Graduatoria per ruolo")
     ranking = sorted(roster, key=lambda p: player_score(p, strategy), reverse=True)
     rank_df = pd.DataFrame([{"Giocatore": p["name"], "Ruolo": p["role"], "Score": round(player_score(p, strategy), 2), "FP attesi": p["expected"], "Titolarità %": p["start_probability"], "Rischio": p["risk"]} for p in ranking])
@@ -258,9 +270,12 @@ def page_lineup(db: Database, league: dict, matchday: int) -> None:
             by_id = {p["id"]: p for p in roster}
             ids = st.multiselect("Undici titolari", list(by_id), max_selections=11,
                                  format_func=lambda pid: f"{by_id[pid]['name']} · {by_id[pid]['role']}")
+            bench_ids = st.multiselect("Panchina in ordine di ingresso", [pid for pid in by_id if pid not in ids],
+                                       max_selections=int(league.get("bench_size", 7)),
+                                       format_func=lambda pid: f"{by_id[pid]['name']} · {by_id[pid]['role']}")
             if st.form_submit_button("Salva formazione manuale"):
                 try:
-                    db.save_lineup(int(league["id"]), matchday, manual_formation, ids)
+                    db.save_lineup(int(league["id"]), matchday, manual_formation, ids, bench_ids)
                     st.success("Formazione manuale salvata.")
                 except ValueError as exc:
                     st.error(str(exc))
@@ -269,8 +284,15 @@ def page_lineup(db: Database, league: dict, matchday: int) -> None:
         st.markdown(f"### Formazione salvata · {saved['formation']}")
         st.caption(f"Salvata il {fmt_time(saved['saved_at'])}. È una copia dell'undici al momento della conferma.")
         st.write(", ".join(p["name"] for p in saved["players"]))
-        tally = lineup_score(saved["players"], db.records(int(league["id"]), matchday))
+        if saved.get("bench"):
+            st.caption("Panchina: " + " · ".join(f"{p['name']} ({p['role']})" for p in saved["bench"]))
+        tally = lineup_score(saved["players"], db.records(int(league["id"]), matchday),
+                             saved.get("bench", []), int(league.get("max_substitutions", 3)), league)
         st.write(f"Voti disponibili: {tally['count']}/11 · Punti: {tally['total'] if tally['total'] is not None else '—'}")
+        if tally["substitutions"]:
+            st.success("Sostituzioni: " + "; ".join(f"{item['out']} → {item['in']}" for item in tally["substitutions"]))
+        if tally["defense_average"] is not None:
+            st.info(f"Modificatore difesa: media {tally['defense_average']:.2f} · bonus {tally['defense_modifier']:+g}")
         if tally["missing"]:
             st.caption("Senza punteggio abbinabile: " + ", ".join(tally["missing"]))
         st.download_button("Esporta formazione", json.dumps(saved, ensure_ascii=False, indent=2),
@@ -279,34 +301,53 @@ def page_lineup(db: Database, league: dict, matchday: int) -> None:
 
 def page_auction(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
+    statistics = db.season_statistics(int(league["id"]))
     st.title("Auction war room")
-    if not roster:
-        st.info("Aggiungi giocatori e valutazioni in Rosa per usare il calcolatore d'asta.")
+    st.caption("Acquisti registrati nella rosa e nel registro movimenti. Il prezzo obiettivo resta una tua valutazione.")
+    if "auction_feedback" in st.session_state:
+        st.success(st.session_state.pop("auction_feedback"))
+    owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
+    owned_names = {p["name"].casefold() for p in roster}
+    candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
+                  and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
+    if not candidates:
+        st.info("Sincronizza almeno una giornata Gazzetta: i calciatori non ancora in rosa appariranno qui.")
         return
-    st.caption("Simulazione sui giocatori e sulle valutazioni inserite. Non registra un'asta sulla piattaforma della lega.")
-    st.markdown('<div class="subhead">Stop loss dinamico calcolato sul budget, sugli slot residui e sulla scarsità del ruolo.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subhead">Stop loss calcolato sul budget reale residuo, sugli slot mancanti e sul rendimento ufficiale osservato.</div>', unsafe_allow_html=True)
     left, right = st.columns([1, 1.55], gap="large")
+    residual = max(0, db.available_budget(int(league["id"])))
     with left:
         with st.form("auction"):
-            player_name = st.selectbox("Giocatore sul tavolo", [p["name"] for p in roster])
-            budget = st.number_input("Budget residuo", min_value=1, max_value=int(league["budget"]), value=min(184, int(league["budget"])))
-            slots = st.number_input("Slot mancanti", min_value=1, max_value=30, value=7)
-            current_bid = st.number_input("Offerta attuale", min_value=0, max_value=int(league["budget"]), value=22)
-            submitted = st.form_submit_button("Calcola stop loss", width="stretch")
-        player = next(p for p in roster if p["name"] == player_name)
+            candidate_keys = list(range(len(candidates)))
+            candidate_index = st.selectbox("Giocatore sul tavolo", candidate_keys,
+                format_func=lambda index: f"{candidates[index]['name']} · {candidates[index]['role']} · {candidates[index]['team']}")
+            target = st.number_input("Valore obiettivo", min_value=1, max_value=int(league["budget"]), value=10)
+            slots = st.number_input("Slot ancora da acquistare", min_value=1, max_value=100, value=max(1, 25-len(roster)))
+            current_bid = st.number_input("Offerta attuale", min_value=0, max_value=int(league["budget"]), value=1)
+            counterparty = st.text_input("Controparte (facoltativa)", placeholder="Nome fantallenatore")
+            submitted = st.form_submit_button("Registra acquisto", width="stretch", type="primary")
+        player = candidates[candidate_index]
         role_count = len([p for p in roster if p["role"] == player["role"]])
         scarcity = 1.12 if player["role"] == "ATT" or role_count < 4 else 1.0
         reserve = max(int(slots) - 1, 0)
-        max_bid = max(0, min(round(int(player["price"]) * scarcity), int(budget) - reserve))
+        max_bid = max(0, min(round(int(target) * scarcity), residual - reserve))
         verdict = "RILANCIA" if current_bid < max_bid else "LASCIALO"
-        st.markdown(f'<div class="decision-box"><h3>Verdetto live</h3><div class="verdict">{verdict}</div><p>Stop loss <b>{max_bid} cr</b> · {max_bid/int(league["budget"]):.1%} del budget iniziale. Riserva minima: {reserve} cr.</p></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="decision-box"><h3>Verdetto live</h3><div class="verdict">{verdict}</div><p>Budget residuo <b>{residual} cr</b> · stop loss <b>{max_bid} cr</b> · riserva minima {reserve} cr.</p></div>', unsafe_allow_html=True)
         if submitted:
-            st.toast(f"Stop loss fissato a {max_bid} crediti", icon="🛑")
+            try:
+                db.acquire_player(int(league["id"]), {**player, "expected": player.get("average_fantavote") or 6,
+                    "start_probability": 75, "risk": "Medio", "price": int(target), "tier": "C", "trend": player.get("trend", 0)},
+                    int(current_bid), counterparty=counterparty)
+                st.session_state["auction_feedback"] = f"{player['name']} acquistato per {current_bid} crediti."
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
     with right:
-        st.markdown("### Value board")
-        board = pd.DataFrame([{"Giocatore":p["name"],"Ruolo":p["role"],"Tier":p["tier"],"Valore cr":p["price"],"FP attesi":p["expected"],"Value":round(p["expected"]/max(p["price"],1),3)} for p in roster]).sort_values("Value",ascending=False)
+        st.markdown("### Rendimento ufficiale disponibile")
+        board = pd.DataFrame([{"Giocatore":p["name"],"Ruolo":p["role"],"FM lega":p["average_fantavote"],"Presenze":p["appearances"],
+            "MV":p["average_vote"],"Squadra":p["team"],"Gol":p["goals"],"Assist":p["assists"],"Trend %":p["trend"]} for p in candidates])
         st.dataframe(board, hide_index=True, width="stretch")
-        st.markdown('<div class="panel"><b class="positive">STRATEGIA ANTI-FOMO</b><p style="color:#b8c7cd">Il limite calcolato è vincolante: superarlo riduce il rendimento atteso per credito e la flessibilità sugli slot rimanenti.</p></div>', unsafe_allow_html=True)
+        st.caption("Medie e trend provengono solo dalle giornate importate. Non sono previsioni di titolarità né quotazioni d'asta.")
 
 
 def page_roster(db: Database, league: dict, matchday: int) -> None:
@@ -347,9 +388,49 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
     spent = sum(p["purchase_cost"] for p in roster)
     c1.metric("Giocatori", len(roster))
     c2.metric("Costo rosa", f"{spent} cr")
-    c3.metric("Budget residuo", f"{int(league['budget']) - spent} cr")
-    if spent > int(league["budget"]):
-        st.warning("Il costo della rosa supera il budget. Controlla i costi d'acquisto; la rosa iniziale è dimostrativa.")
+    available = db.available_budget(int(league["id"]))
+    c3.metric("Budget residuo", f"{available} cr")
+    if available < 0:
+        st.warning("Il costo della rosa supera il budget. Controlla i costi d'acquisto.")
+    statistics = db.season_statistics(int(league["id"]))
+    if statistics and roster:
+        by_source = {(row.get("vote_provider"), row.get("provider_player_id")): row for row in statistics if row.get("provider_player_id")}
+        by_name = {(row["name"].casefold(), row.get("team", "").casefold()): row for row in statistics}
+        observed = []
+        for player in roster:
+            stat = by_source.get((player.get("vote_provider"), player.get("provider_player_id")))
+            stat = stat or by_name.get((player["name"].casefold(), player.get("team", "").casefold()))
+            if stat:
+                observed.append({"Giocatore": player["name"], "Ruolo": player["role"], "Presenze": stat["appearances"],
+                    "Media voto": stat["average_vote"], "Fantamedia lega": stat["average_fantavote"],
+                    "Gol": stat["goals"], "Assist": stat["assists"], "Trend ultime 3 %": stat["trend"]})
+        if observed:
+            with st.expander("Rendimento ufficiale della rosa", expanded=True):
+                st.dataframe(pd.DataFrame(observed), hide_index=True, width="stretch")
+                st.caption("Calcolato dalle giornate importate per questa stagione e redazione; separato dalle stime usate dall'ottimizzatore.")
+    if roster:
+        with st.expander("Registra una cessione"):
+            with st.form("release_player"):
+                by_id = {p["id"]: p for p in roster}
+                player_id = st.selectbox("Giocatore ceduto", list(by_id), format_func=lambda value: f"{by_id[value]['name']} · {by_id[value]['role']}")
+                proceeds = st.number_input("Crediti recuperati", 0, 5000, 0)
+                counterparty = st.text_input("Controparte", placeholder="Svincolo o nome fantallenatore")
+                note = st.text_input("Nota", placeholder="Facoltativa")
+                if st.form_submit_button("Conferma cessione"):
+                    try:
+                        name = by_id[player_id]["name"]
+                        db.release_player(int(league["id"]), int(player_id), int(proceeds), counterparty=counterparty, note=note)
+                        st.session_state["roster_feedback"] = f"Cessione di {name} registrata."
+                        st.session_state["roster_version"] = editor_version + 1
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(str(exc))
+    transactions = db.transactions(int(league["id"]))
+    if transactions:
+        with st.expander("Registro movimenti"):
+            movement_df = pd.DataFrame(transactions).rename(columns={"kind":"Tipo","player_name":"Giocatore","role":"Ruolo",
+                "team":"Squadra","amount":"Crediti","counterparty":"Controparte","note":"Nota","created_at":"Data"})
+            st.dataframe(movement_df[["Data","Tipo","Giocatore","Ruolo","Squadra","Crediti","Controparte","Nota"]], hide_index=True, width="stretch")
     st.download_button("Esporta rosa CSV", roster_csv(roster), "rosa-fantaoperator.csv", "text/csv")
     with st.expander("Importa la tua rosa da CSV"):
         st.caption("Usa il modello: name, role (POR/DIF/CEN/ATT), team e purchase_cost. Le altre colonne sono stime facoltative; valori iniziali neutri: 6 FP, 75% titolarità e rischio medio.")
@@ -391,20 +472,47 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
 
 def page_market(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
+    statistics = db.season_statistics(int(league["id"]))
     st.title("Mercato & scambi")
-    if len(roster) < 2:
-        st.info("Inserisci almeno due giocatori in Rosa per confrontarne le valutazioni.")
+    if "market_feedback" in st.session_state:
+        st.success(st.session_state.pop("market_feedback"))
+    if not roster:
+        st.info("Inserisci la tua rosa prima di valutare uno scambio.")
         return
-    st.caption("Confronto tra giocatori inseriti in rosa; non invia né registra scambi sulla piattaforma della lega.")
-    st.markdown('<div class="subhead">Confronto corretto per minuti attesi, rischio e produzione prevista.</div>', unsafe_allow_html=True)
+    owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
+    owned_names = {p["name"].casefold() for p in roster}
+    candidates = [p for p in statistics if (p.get("vote_provider"), p.get("provider_player_id")) not in owned_ids
+                  and (p.get("provider_player_id") or p["name"].casefold() not in owned_names)]
+    if not candidates:
+        st.info("Sincronizza i voti Gazzetta per confrontare la rosa con calciatori esterni.")
+        return
+    st.caption("Confronto tra una tua stima e il rendimento ufficiale osservato del giocatore in entrata.")
+    st.markdown('<div class="subhead">Se confermi, lo scambio aggiorna la rosa e il registro movimenti in un’unica operazione.</div>', unsafe_allow_html=True)
     a, arrow, b = st.columns([1,.2,1])
     with a: give=st.selectbox("Cedi",[p["name"] for p in roster],index=0)
     with arrow: st.markdown("<h2 style='text-align:center;margin-top:2rem'>⇄</h2>",unsafe_allow_html=True)
-    with b: receive=st.selectbox("Confronta con",[p["name"] for p in roster if p["name"] != give])
-    left=next(p for p in roster if p["name"]==give); right=next(p for p in roster if p["name"]==receive)
+    with b:
+        candidate_index=st.selectbox("Ricevi",list(range(len(candidates))),format_func=lambda index: f"{candidates[index]['name']} · {candidates[index]['role']} · {candidates[index]['team']}")
+    left=next(p for p in roster if p["name"]==give)
+    observed=candidates[candidate_index]
+    right={**observed,"expected":observed.get("average_fantavote") or 6,"start_probability":75,"risk":"Medio",
+           "price":left["price"],"tier":"C","trend":observed.get("trend",0)}
     result=compare_players(left,right)
-    c1,c2,c3=st.columns(3);c1.metric("Delta score",f"{result['delta']:+.2f}");c2.metric("Delta valore",f"{right['price']-left['price']:+d} cr");c3.metric("Verdetto",result["verdict"])
-    st.markdown(f'<div class="decision-box"><h3>Azione</h3><div class="verdict">{result["verdict"]}: {html.escape(give)} → {html.escape(receive)}</div><p>Indice euristico {result["confidence"]}/100: non è una probabilità di successo. Il confronto usa le stime inserite in rosa.</p></div>',unsafe_allow_html=True)
+    c1,c2,c3=st.columns(3);c1.metric("Delta score",f"{result['delta']:+.2f}");c2.metric("Fantamedia entrata",f"{observed['average_fantavote']:.2f}" if observed['average_fantavote'] is not None else "—");c3.metric("Verdetto",result["verdict"])
+    st.markdown(f'<div class="decision-box"><h3>Azione</h3><div class="verdict">{result["verdict"]}: {html.escape(give)} → {html.escape(observed["name"])}</div><p>Indice euristico {result["confidence"]}/100. Per il giocatore in entrata usa la fantamedia delle giornate importate; per quello ceduto usa le stime della rosa.</p></div>',unsafe_allow_html=True)
+    with st.form("confirm_exchange"):
+        incoming_cost = st.number_input("Nuovo costo a bilancio", 0, 5000, int(left["purchase_cost"]))
+        estimated = st.number_input("Stima FP per il nuovo giocatore", 0.0, 30.0, float(observed.get("average_fantavote") or 6), step=.1)
+        counterparty = st.text_input("Controparte", placeholder="Nome fantallenatore")
+        note = st.text_input("Nota", placeholder="Facoltativa")
+        if st.form_submit_button("Conferma scambio", type="primary"):
+            try:
+                db.exchange_player(int(league["id"]), int(left["id"]), {**right, "expected": estimated}, int(incoming_cost),
+                                   counterparty=counterparty, note=note)
+                st.session_state["market_feedback"] = f"Scambio registrato: {give} → {observed['name']}."
+                st.rerun()
+            except ValueError as exc:
+                st.error(str(exc))
 
 
 def page_votes(db: Database, league: dict, matchday: int) -> None:
@@ -476,7 +584,7 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
     st.markdown(f"### Giornata {matchday}")
     if records:
         if any(row["fantavote"] is None for row in records):
-            st.warning("Punteggi incompleti: S.V., codici speciali senza FV o bonus clean sheet non verificabile. Sostituzioni, voti d’ufficio e modificatori di squadra richiedono regole dedicate.")
+            st.warning("Punteggi incompleti: S.V., codici speciali senza FV o bonus clean sheet non verificabile. Le sostituzioni Classic e il modificatore difesa configurato sono applicati alla formazione salvata; altri voti d’ufficio o modificatori richiedono regole dedicate.")
         if latest and (latest["status"] == "ERRORE" or any(row["checked_at"] != latest["checked_at"] for row in records)):
             st.warning("Alcuni dati appartengono a verifiche precedenti. Controlla il timestamp di ogni riga.")
         df=pd.DataFrame(records).rename(columns={"name":"Giocatore","role":"Ruolo","team":"Squadra","official_vote":"Voto","fantavote":"Fantavoto","status":"Stato","goals":"Gol","assists":"Assist","yellow_cards":"Amm.","red_cards":"Esp.","source_name":"Fonte","checked_at":"Acquisito"})
@@ -518,7 +626,7 @@ def page_assistant(db: Database, league: dict, matchday: int) -> None:
 def page_settings(db: Database, league: dict) -> None:
     st.title("Impostazioni lega")
     with st.expander("Backup e ripristino", expanded=not bool(os.getenv("FANTAOPERATOR_DB"))):
-        st.caption("Il backup conserva configurazione, rosa e formazioni salvate. Voti e chat non sono inclusi: i voti possono essere scaricati di nuovo. Gli URL privati e l'aggiornamento automatico non vengono ripristinati.")
+        st.caption("Il backup conserva configurazione, rosa, formazioni con panchina, movimenti e chat. I voti non sono inclusi perché possono essere sincronizzati di nuovo. Gli URL privati e l'aggiornamento automatico non vengono ripristinati.")
         st.download_button("Scarica backup personale", db.export_workspace(int(league["id"])),
                            "fantaoperator-backup.json", "application/json")
         backup = st.file_uploader("Ripristina backup personale", type=["json"], key="workspace_backup")
@@ -539,8 +647,27 @@ def page_settings(db: Database, league: dict) -> None:
     with st.form("league_settings"):
         st.markdown("### Contesto")
         a,b,c=st.columns(3)
-        name=a.text_input("Nome lega",league["name"]);platform=b.selectbox("Piattaforma",["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"],index=["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"].index(league["platform"]) if league["platform"] in ["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"] else 3);mode=c.selectbox("Modalità",["Classic","Mantra"],index=0 if league["mode"]=="Classic" else 1)
+        name=a.text_input("Nome lega",league["name"]);platform=b.selectbox("Piattaforma",["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"],index=["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"].index(league["platform"]) if league["platform"] in ["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"] else 3);mode=c.selectbox("Modalità",["Classic"],index=0)
+        if league["mode"] != "Classic":
+            st.warning("Questo backup usa Mantra. Salva la configurazione per convertirlo in un workspace Classic prima di calcolare la formazione.")
         d,e,f=st.columns(3);participants=d.number_input("Partecipanti",2,20,int(league["participants"]));budget=e.number_input("Budget iniziale",50,5000,int(league["budget"]));matchday=f.number_input("Giornata corrente",1,38,int(league["matchday"]))
+        u,v=st.columns(2)
+        bench_size=u.number_input("Posti in panchina",0,15,int(league.get("bench_size",7)))
+        max_substitutions=v.number_input("Sostituzioni massime",0,11,int(league.get("max_substitutions",3)))
+        defense_modifier=st.checkbox("Abilita modificatore difesa",value=bool(league.get("defense_modifier_enabled",0)),
+                                     help="Si applica con almeno 4 difensori alla media del portiere e dei migliori 3 difensori con voto.")
+        if defense_modifier:
+            st.caption("Configura tre fasce crescenti. Il bonus più alto raggiunto viene sommato al totale.")
+            modifier_values={}
+            modifier_columns=st.columns(3)
+            for index,key in enumerate(("low","mid","high")):
+                with modifier_columns[index]:
+                    modifier_values[f"defense_threshold_{key}"]=st.number_input(f"Soglia {index+1}",value=float(league.get(f"defense_threshold_{key}",(6,6.5,7)[index])),step=.1)
+                    modifier_values[f"defense_bonus_{key}"]=st.number_input(f"Bonus {index+1}",value=float(league.get(f"defense_bonus_{key}",(1,3,6)[index])),step=.5)
+        else:
+            modifier_values={key: league.get(key, default) for key,default in {
+                "defense_threshold_low":6.0,"defense_threshold_mid":6.5,"defense_threshold_high":7.0,
+                "defense_bonus_low":1.0,"defense_bonus_mid":3.0,"defense_bonus_high":6.0}.items()}
         st.markdown("### Fonte voti prioritaria")
         g,h=st.columns([1,2]);provider=g.text_input("Provider voti",league["vote_provider"]);source_url=h.text_input("URL feed voti",league["source_url"],placeholder=gazzetta_votes_url(league["season"]),type="password")
         p,q=st.columns(2)
@@ -556,7 +683,7 @@ def page_settings(db: Database, league: dict) -> None:
         saved=st.form_submit_button("Salva configurazione",type="primary",width="stretch")
     if saved:
         try:
-            db.save_league(int(league["id"]),{"name":name,"platform":platform,"mode":mode,"participants":participants,"budget":budget,"matchday":matchday,"vote_provider":provider.strip(),"vote_edition":edition.strip(),"season":season,"source_url":source_url.strip(),"auto_sync_minutes":auto},values)
+            db.save_league(int(league["id"]),{"name":name,"platform":platform,"mode":mode,"participants":participants,"budget":budget,"matchday":matchday,"bench_size":bench_size,"max_substitutions":max_substitutions,"defense_modifier_enabled":defense_modifier,**modifier_values,"vote_provider":provider.strip(),"vote_edition":edition.strip(),"season":season,"source_url":source_url.strip(),"auto_sync_minutes":auto},values)
         except ValueError as exc:
             st.error(str(exc));return
         st.success("Configurazione salvata e fantavoti ricalcolati")
@@ -584,7 +711,7 @@ def main() -> None:
     page=sidebar(latest)
     if not os.getenv("FANTAOPERATOR_DB"):
         st.sidebar.info("Spazio personale di questa sessione. Prima di chiudere o ricaricare la pagina, scarica il backup in Impostazioni per ritrovare rosa e formazioni.")
-    st.caption("Rosa e stime iniziali dimostrative · I voti importati sono separati · Nessun accesso live alla lega configurato automaticamente")
+    st.caption("Workspace Classic personale · Voti ufficiali separati dalle stime · Operazioni sulla piattaforma della lega non inviate automaticamente")
     latest=db.latest_sync(int(league["id"]),matchday)
     auto_sync(db,league,latest)
     if "Panoramica" in page: page_overview(db,league,matchday,latest)
