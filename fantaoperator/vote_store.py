@@ -75,7 +75,7 @@ class VoteStore:
         normalized = normalize_rows(rows, default_status)
         if not 1 <= matchday <= 38:
             raise ValueError("Giornata non valida")
-        if provenance not in {"IMPORT_LOCALE", "FEED_CONFIGURATO"}:
+        if provenance not in {"IMPORT_LOCALE", "FEED_CONFIGURATO", "PAGINA_UFFICIALE"}:
             raise ValueError("Provenienza non valida")
         checked_at, changes = now(), []
         with self.connect() as db:

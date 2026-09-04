@@ -45,7 +45,7 @@ def calculate_fantavote(
     penalties_saved: int = 0,
     penalties_scored: int = 0,
     penalties_missed: int = 0,
-    clean_sheet: bool = False,
+    clean_sheet: bool | None = False,
     custom_bonus: float = 0.0,
     custom_malus: float = 0.0,
     rules: ScoringRules | None = None,
@@ -54,6 +54,8 @@ def calculate_fantavote(
     if official_vote is None:
         return None
     rules = rules or ScoringRules()
+    if clean_sheet is None and rules.clean_sheet != 0:
+        return None  # Unknown eligibility must not silently lose a configured bonus.
     result = (
         float(official_vote)
         + (goals - penalties_scored) * rules.goal
@@ -84,8 +86,8 @@ FORMATION_LIMITS: dict[str, dict[str, int]] = {
 
 
 def player_score(player: Mapping[str, object], strategy: str = "Equilibrato") -> float:
-    expected = float(player.get("expected", 6.0) or 6.0)
-    start_probability = float(player.get("start_probability", 75) or 75) / 100
+    expected = float(player.get("expected", 6.0))
+    start_probability = float(player.get("start_probability", 75)) / 100
     trend = float(player.get("trend", 0) or 0)
     risk = str(player.get("risk", "Medio"))
     risk_penalty = {"Basso": 0.0, "Medio": 0.18, "Alto": 0.42}.get(risk, 0.18)

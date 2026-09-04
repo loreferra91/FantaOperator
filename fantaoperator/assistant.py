@@ -14,6 +14,8 @@ def _source_line(latest_sync: Mapping[str, Any] | None) -> str:
     status = latest_sync.get("status", "N/D")
     checked = str(latest_sync.get("checked_at", "")).replace("T", " ").replace("+00:00", " UTC")
     origin = "Import locale, non verificato sul Web" if latest_sync.get("provenance") == "IMPORT_LOCALE" else "Feed configurato; provenienza dichiarata dal feed"
+    if latest_sync.get("provenance") == "PAGINA_UFFICIALE":
+        origin = "Pagina pubblica Fantacalcio.it ricontrollata; consolidamento non attestato. Clean sheet e modificatori non disponibili"
     if status == "ERRORE":
         return f"Ultimo tentativo fallito: **{checked}**. I dati precedenti restano in archivio, non sono stati riverificati."
     return f"Fonte: **{latest_sync.get('source_name', 'N/D')} / {latest_sync.get('edition', '')}** · Stato: **{status}** · Ultima acquisizione: **{checked}**. {origin}."
@@ -61,6 +63,8 @@ def respond(db, league: dict, matchday: int, query: str) -> str:
                 return notice + "Nessun confronto nuovo eseguito: non mostro rettifiche precedenti come appena rilevate."
         else:
             notice = f"Feed ricontrollato per **{league['season']} · giornata {matchday}**.\n\n"
+            if result.get("warnings"):
+                notice += "\n\n".join(result["warnings"]) + "\n\n"
     routed_query = "/VOTI" if dynamic and not query.strip().startswith("/") else query
     return notice + answer(routed_query, league=league, roster=db.roster(league["id"]),
         records=db.records(league["id"], matchday), latest_sync=db.latest_sync(league["id"], matchday))
@@ -84,7 +88,11 @@ def answer(
     if command == "/AGGIORNAVOTI":
         return f"### 🎯 Verdetto\n{_changes(latest_sync)}\n\n{_source_line(latest_sync)}"
     if command in {"/FORMAZIONE", "/GIORNATA"} or any(word in clean.lower() for word in ("formazione", "schierare", "titolare")):
+        if league.get("mode", "Classic") != "Classic":
+            return "I moduli Mantra non sono ancora supportati. Il motore attuale genera soltanto formazioni Classic."
         formation, selected, total = optimize_lineup(roster)
+        if not selected:
+            return "La rosa non ha abbastanza giocatori per un undici Classic valido. Completa i reparti nella sezione Rosa."
         names = ", ".join(str(p["name"]) for p in selected)
         return (
             f"### 🎯 Verdetto\n**{formation}** · {total:.1f} fantapunti attesi\n\n"
@@ -100,7 +108,7 @@ def answer(
         return (
             f"### 🎯 Verdetto\n**{result['verdict']}** lo switch {mentioned[0]['name']} → {mentioned[1]['name']}.\n\n"
             f"### 💰 Value\nDelta corretto per titolarità e rischio: **{result['delta']:+.2f}**.\n\n"
-            f"### ⚠️ Rischio\nConfidence **{result['confidence']}%**. Verifica sempre i dati dinamici prima della scelta finale."
+            f"### ⚠️ Rischio\nIndice euristico **{result['confidence']}/100**, non una probabilità di successo. Il confronto usa le stime salvate in rosa."
         )
     if command in {"/ASTA", "/ASTALIVE", "/VALUE"} or "asta" in clean.lower():
         targets = sorted(roster, key=lambda p: (float(p.get("expected", 0)) / max(float(p.get("price", 1)), 1)), reverse=True)

@@ -11,3 +11,5 @@ fantacalcio_cookie.txt
 data/*.sync.lock
 RESUME.md
 .DS_Store
+.venv/
+.runtime/

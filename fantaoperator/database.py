@@ -11,6 +11,7 @@ from typing import Any, Iterable, Iterator, Mapping
 from .engine import ScoringRules
 from .vote_store import VoteStore
 from .official_votes import season_name
+from .workspace import WorkspaceStore, validate_league
 
 
 SEED_PLAYERS = [
@@ -41,7 +42,7 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-class Database(VoteStore):
+class Database(VoteStore, WorkspaceStore):
     def __init__(self, path: str | Path | None = None) -> None:
         configured = path or os.getenv("FANTAOPERATOR_DB")
         self.path = Path(configured or Path(__file__).resolve().parents[1] / "data" / "fantaoperator.db")
@@ -145,6 +146,7 @@ class Database(VoteStore):
                 """
             )
             self.initialize_votes(db)
+            self.initialize_workspace(db)
             count = db.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
             if count == 0:
                 now = utc_now()
@@ -186,7 +188,7 @@ class Database(VoteStore):
             "name", "platform", "mode", "participants", "budget", "matchday",
             "vote_provider", "source_url", "auto_sync_minutes", "season", "vote_edition",
         }
-        fields = {key: values[key] for key in allowed if key in values}
+        fields = validate_league({key: values[key] for key in allowed if key in values})
         if "season" in fields:
             fields["season"] = season_name(fields["season"])
         for key in ("vote_provider", "vote_edition"):

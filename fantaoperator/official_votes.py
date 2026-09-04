@@ -89,7 +89,7 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]], default_status: str = "PRO
         clean = str(item.get("clean_sheet") or "0").lower()
         if clean not in {"0", "1", "true", "false", "si", "sì", "no", "yes"}:
             raise ValueError("Clean sheet non valido")
-        row["clean_sheet"] = clean in {"1", "true", "si", "sì", "yes"}
+        row["clean_sheet"] = None if "clean_sheet" in item and item["clean_sheet"] is None else clean in {"1", "true", "si", "sì", "yes"}
         for key in ("custom_bonus", "custom_malus"):
             row[key] = number(item.get(key) or 0, key)
         for key in AMBIGUOUS_FIELDS:

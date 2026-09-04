@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import html
 import json
+import os
+import tempfile
+from pathlib import Path
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -9,7 +12,8 @@ import streamlit as st
 
 from fantaoperator.assistant import respond
 from fantaoperator.database import Database
-from fantaoperator.engine import compare_players, optimize_lineup, player_score
+from fantaoperator.engine import FORMATION_LIMITS, compare_players, optimize_lineup, player_score
+from fantaoperator.workspace import PLAYER_FIELDS, lineup_score, parse_roster_csv, roster_csv
 from fantaoperator.sources import csv_template, safe_url
 from fantaoperator.official_votes import EDITIONS
 from fantaoperator.updater import import_votes, refresh_votes, sync_due
@@ -23,9 +27,17 @@ st.set_page_config(
 )
 
 
-@st.cache_resource
 def database() -> Database:
-    return Database()
+    # Anonymous cloud visitors must never share roster, settings or chat.
+    # The local launcher explicitly supplies its persistent database path.
+    if "workspace_db" not in st.session_state:
+        path = os.getenv("FANTAOPERATOR_DB")
+        if not path:
+            directory = tempfile.TemporaryDirectory(prefix="fantaoperator-")
+            st.session_state["workspace_directory"] = directory
+            path = str(Path(directory.name) / "workspace.db")
+        st.session_state["workspace_db"] = Database(path)
+    return st.session_state["workspace_db"]
 
 
 def inject_css() -> None:
@@ -57,6 +69,10 @@ def inject_css() -> None:
         .source-card{display:grid;grid-template-columns:1.2fr .75fr .75fr 1fr;gap:.6rem;align-items:center;background:#0a1f2e;border:1px solid var(--line);border-radius:9px;padding:.8rem 1rem;margin:.35rem 0}.source-card small{color:var(--muted)}.audit{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.72rem;color:#9eb0b8;word-break:break-all}.source-note{color:#718c99;font-size:.72rem;margin-top:.6rem}
         .stButton>button,.stFormSubmitButton>button,.stDownloadButton>button{background:var(--lime);color:#071722;border:0;border-radius:7px;font-weight:800;text-transform:uppercase;min-height:2.7rem}.stButton>button:hover,.stFormSubmitButton>button:hover,.stDownloadButton>button:hover{background:#ddff31;color:#071722}div[data-baseweb="select"]>div{background:#0b2231!important;border-color:#315367!important;color:white!important}div[data-baseweb="select"] span{color:white!important}.stTextInput input,.stNumberInput input,.stTextArea textarea{background:#0b2231!important;border-color:#315367!important;color:white!important}[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:8px;overflow:hidden}[data-testid="stChatMessage"]{background:#081d2a;border:1px solid #203c4d;border-radius:10px;padding:.6rem 1rem}[data-testid="stChatMessage"] p,[data-testid="stChatMessage"] td,[data-testid="stChatMessage"] th{color:#dbe5e8!important}[data-testid="stChatMessage"] table{border-color:#315367!important}[data-testid="stBottomBlockContainer"],[data-testid="stBottomBlockContainer"]>div{background:var(--navy)!important}[data-testid="stChatInput"],[data-testid="stChatInput"]>div,[data-testid="stChatInput"] div[data-baseweb="base-input"]{background:#0b2231!important;border-color:#315367!important}[data-testid="stChatInput"] textarea{color:white!important;background:#0b2231!important}[data-testid="stChatInput"] textarea::placeholder{color:#91a4ae!important;opacity:1}[data-testid="stChatInput"] button{background:#142b39!important;color:#dbe5e8!important}
         @media(max-width:900px){[data-testid="stMainBlockContainer"]{padding:4rem 1rem 1rem}h1{font-size:2.3rem!important}.pitch{min-height:440px}.player{min-width:76px;padding:.28rem}.player b{font-size:.58rem}.source-card{grid-template-columns:1fr 1fr}.status-label{text-align:left}}
+        .player{box-sizing:border-box;min-width:0;width:14%;max-width:104px;padding:.34rem .2rem}
+        .player b{overflow:hidden;text-overflow:ellipsis}
+        @media(max-width:1000px){[data-testid="stHorizontalBlock"]{flex-wrap:wrap!important}[data-testid="stHorizontalBlock"]>[data-testid="stColumn"]{flex:1 1 200px!important;min-width:0!important}[data-testid="stMetricLabel"] p{white-space:normal!important}}
+        @media(max-width:1000px){[data-testid="stHorizontalBlock"]:has(.pitch){flex-wrap:wrap!important}[data-testid="stHorizontalBlock"]:has(.pitch)>[data-testid="stColumn"]{flex:1 1 100%!important;width:100%!important}}
         </style>
         """,
         unsafe_allow_html=True,
@@ -103,7 +119,7 @@ def top_controls(db: Database, league_id: int, latest: dict | None) -> tuple[dic
     leagues = db.leagues()
     ids = [int(item["id"]) for item in leagues]
     current_index = ids.index(league_id) if league_id in ids else 0
-    c1, c2, _, c4 = st.columns([1.3, 1, 3.5, 1.3])
+    c1, c2, c4 = st.columns([1.3, 1, 1.3])
     with c1:
         selected = st.selectbox("Lega", ids, index=current_index, format_func=lambda value: next(x["name"] for x in leagues if x["id"] == value), label_visibility="collapsed")
         if selected != league_id:
@@ -134,6 +150,8 @@ def pitch_html(selected: list[dict]) -> str:
 
 
 def priority_html(roster: list[dict]) -> str:
+    if not roster:
+        return '<div class="panel">Aggiungi i tuoi giocatori nella sezione Rosa per iniziare.</div>'
     high_risk = sorted((p for p in roster if p["risk"] == "Alto"), key=lambda p: p["price"], reverse=True)
     value = sorted(roster, key=lambda p: float(p["expected"]) / max(int(p["price"]), 1), reverse=True)
     weak_role = min(("POR", "DIF", "CEN", "ATT"), key=lambda role: len([p for p in roster if p["role"] == role]))
@@ -163,14 +181,19 @@ def page_overview(db: Database, league: dict, matchday: int, latest: dict | None
     with action:
         st.button("◎ Ottimizza formazione", width="stretch", type="primary",
                   on_click=navigate, args=("▥  Formazione",))
-    official_total = sum(float(row["fantavote"]) for row in records if row["fantavote"] is not None and row["name"] in {p["name"] for p in selected})
+    saved = db.saved_lineup(int(league["id"]), matchday)
+    tally = lineup_score(saved["players"] if saved else [], records)
     confidence = round(sum(int(p["start_probability"]) for p in selected) / max(len(selected), 1))
     risk_count = len([p for p in selected if p["risk"] == "Alto"])
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Lineup confidence", f"{confidence}%")
+    m1.metric("Titolarità media stimata", f"{confidence}%")
     m2.metric("Fantapunti attesi", f"{expected:.1f}")
-    m3.metric("Punti registrati", f"{official_total:.1f}" if records else "—")
+    m3.metric("Punti undici salvato" if tally["complete"] else "Punti parziali undici salvato", f"{tally['total']:.1f}" if tally["total"] is not None else "—")
     m4.metric("Rischio undici", "ALTO" if risk_count >= 3 else "MEDIO" if risk_count else "BASSO")
+    st.caption(f"Voti disponibili: {tally['count']}/11. Somma individuale, prima di sostituzioni e modificatori." if saved else "Salva la formazione della giornata per seguirne il punteggio.")
+    if league["mode"] != "Classic":
+        st.warning("Ottimizzazione Classic: i ruoli e i moduli Mantra non sono ancora supportati.")
+        return
     left, right = st.columns([2.15, 1], gap="small")
     with left:
         st.markdown(f'<div class="section-label">Formazione consigliata &nbsp; <span style="color:#43c7dc">{formation}</span></div>', unsafe_allow_html=True)
@@ -188,6 +211,9 @@ def page_overview(db: Database, league: dict, matchday: int, latest: dict | None
         else:
             st.info("Importa il primo file ufficiale nella sezione Voti & dati.")
     st.markdown("### Segnali della rosa")
+    if not roster:
+        st.info("La rosa è vuota. Apri Rosa per aggiungere giocatori o importare un CSV.")
+        return
     a, b = st.columns(2)
     undervalued = sorted(roster, key=lambda p: (p["trend"], p["expected"] / max(p["price"], 1)), reverse=True)[:3]
     risks = sorted(roster, key=lambda p: (p["risk"] == "Alto", -p["start_probability"]), reverse=True)[:3]
@@ -197,17 +223,22 @@ def page_overview(db: Database, league: dict, matchday: int, latest: dict | None
         st.dataframe(pd.DataFrame(risks)[["name", "role", "risk", "start_probability"]].rename(columns={"name":"Giocatore","role":"Ruolo","risk":"Rischio","start_probability":"Titolarità %"}), hide_index=True, width="stretch")
 
 
-def page_lineup(db: Database, league: dict) -> None:
+def page_lineup(db: Database, league: dict, matchday: int) -> None:
     roster = db.roster(int(league["id"]))
     st.title("Ottimizzatore formazione")
+    if league["mode"] != "Classic":
+        st.warning("I moduli Mantra richiedono un motore dedicato. L'ottimizzatore attuale supporta Classic.")
+        return
+    st.caption(f"{league['season']} · Giornata {matchday} · Stime inserite in rosa, non previsioni live.")
     st.markdown('<div class="subhead">Il motore confronta tutti i moduli validi pesando rendimento, titolarità, trend e rischio.</div>', unsafe_allow_html=True)
     controls, result = st.columns([1, 2], gap="large")
     with controls:
         strategy = st.radio("Profilo strategico", ["Equilibrato", "Difendi il vantaggio", "Cerca il bonus"])
         formation, selected, total = optimize_lineup(roster, strategy)
         st.markdown(f'<div class="decision-box"><h3>Verdetto</h3><div class="verdict">{formation} · {strategy}</div><p>{total:.1f} fantapunti attesi. Il risultato viene ricalcolato dai dati persistiti della rosa.</p></div>', unsafe_allow_html=True)
-        if st.button("Conferma undici", width="stretch"):
-            st.toast(f"Formazione {formation} confermata", icon="✅")
+        if st.button("Conferma undici", width="stretch", disabled=len(selected) != 11):
+            db.save_lineup(int(league["id"]), matchday, formation, [p["id"] for p in selected])
+            st.success(f"Formazione {formation} salvata per la giornata {matchday}.")
     with result:
         if selected:
             st.markdown(pitch_html(selected), unsafe_allow_html=True)
@@ -217,11 +248,38 @@ def page_lineup(db: Database, league: dict) -> None:
     ranking = sorted(roster, key=lambda p: player_score(p, strategy), reverse=True)
     rank_df = pd.DataFrame([{"Giocatore": p["name"], "Ruolo": p["role"], "Score": round(player_score(p, strategy), 2), "FP attesi": p["expected"], "Titolarità %": p["start_probability"], "Rischio": p["risk"]} for p in ranking])
     st.dataframe(rank_df, hide_index=True, width="stretch", column_config={"Titolarità %": st.column_config.ProgressColumn(min_value=0,max_value=100,format="%d%%")})
+    with st.expander("Scegli manualmente i titolari"):
+        with st.form(f"manual_lineup_{league['id']}_{matchday}"):
+            manual_formation = st.selectbox("Modulo", list(FORMATION_LIMITS))
+            by_id = {p["id"]: p for p in roster}
+            ids = st.multiselect("Undici titolari", list(by_id), max_selections=11,
+                                 format_func=lambda pid: f"{by_id[pid]['name']} · {by_id[pid]['role']}")
+            if st.form_submit_button("Salva formazione manuale"):
+                try:
+                    db.save_lineup(int(league["id"]), matchday, manual_formation, ids)
+                    st.success("Formazione manuale salvata.")
+                except ValueError as exc:
+                    st.error(str(exc))
+    saved = db.saved_lineup(int(league["id"]), matchday)
+    if saved:
+        st.markdown(f"### Formazione salvata · {saved['formation']}")
+        st.caption(f"Salvata il {fmt_time(saved['saved_at'])}. È una copia dell'undici al momento della conferma.")
+        st.write(", ".join(p["name"] for p in saved["players"]))
+        tally = lineup_score(saved["players"], db.records(int(league["id"]), matchday))
+        st.write(f"Voti disponibili: {tally['count']}/11 · Punti: {tally['total'] if tally['total'] is not None else '—'}")
+        if tally["missing"]:
+            st.caption("Senza punteggio abbinabile: " + ", ".join(tally["missing"]))
+        st.download_button("Esporta formazione", json.dumps(saved, ensure_ascii=False, indent=2),
+                           f"formazione-{league['season']}-{matchday}.json", "application/json")
 
 
 def page_auction(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
     st.title("Auction war room")
+    if not roster:
+        st.info("Aggiungi giocatori e valutazioni in Rosa per usare il calcolatore d'asta.")
+        return
+    st.caption("Simulazione sui giocatori e sulle valutazioni inserite. Non registra un'asta sulla piattaforma della lega.")
     st.markdown('<div class="subhead">Stop loss dinamico calcolato sul budget, sugli slot residui e sulla scarsità del ruolo.</div>', unsafe_allow_html=True)
     left, right = st.columns([1, 1.55], gap="large")
     with left:
@@ -235,7 +293,7 @@ def page_auction(db: Database, league: dict) -> None:
         role_count = len([p for p in roster if p["role"] == player["role"]])
         scarcity = 1.12 if player["role"] == "ATT" or role_count < 4 else 1.0
         reserve = max(int(slots) - 1, 0)
-        max_bid = max(1, min(round(int(player["price"]) * scarcity), int(budget) - reserve))
+        max_bid = max(0, min(round(int(player["price"]) * scarcity), int(budget) - reserve))
         verdict = "RILANCIA" if current_bid < max_bid else "LASCIALO"
         st.markdown(f'<div class="decision-box"><h3>Verdetto live</h3><div class="verdict">{verdict}</div><p>Stop loss <b>{max_bid} cr</b> · {max_bid/int(league["budget"]):.1%} del budget iniziale. Riserva minima: {reserve} cr.</p></div>', unsafe_allow_html=True)
         if submitted:
@@ -250,33 +308,93 @@ def page_auction(db: Database, league: dict) -> None:
 def page_roster(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
     st.title("Rosa & rischio")
-    st.markdown('<div class="subhead">Modifica le valutazioni: ogni cambiamento viene salvato nel database locale.</div>', unsafe_allow_html=True)
-    frame = pd.DataFrame(roster).rename(columns={"id":"ID","name":"Giocatore","role":"Ruolo","team":"Squadra","expected":"FP attesi","start_probability":"Titolarità %","risk":"Rischio","price":"Valore cr","tier":"Tier","trend":"Trend %","purchase_cost":"Costo"})
-    columns = ["ID","Giocatore","Ruolo","Squadra","FP attesi","Titolarità %","Rischio","Valore cr","Tier","Trend %","Costo"]
-    edited = st.data_editor(frame[columns], hide_index=True, width="stretch", disabled=["ID"], column_config={"ID":None,"Ruolo":st.column_config.SelectboxColumn(options=["POR","DIF","CEN","ATT"]),"Rischio":st.column_config.SelectboxColumn(options=["Basso","Medio","Alto"]),"Tier":st.column_config.SelectboxColumn(options=["S","A","B","C","D","E"]),"Titolarità %":st.column_config.ProgressColumn(min_value=0,max_value=100,format="%d%%")})
+    st.caption("Aggiungi o rimuovi righe, poi salva. FP attesi, titolarità, rischio e valore sono tue stime: il download dei voti non le aggiorna.")
+    if "roster_feedback" in st.session_state:
+        st.success(st.session_state.pop("roster_feedback"))
+    fields = [*PLAYER_FIELDS, "purchase_cost"]
+    columns = {
+        "name": st.column_config.TextColumn("Giocatore", required=True),
+        "role": st.column_config.SelectboxColumn("Ruolo", options=["POR", "DIF", "CEN", "ATT"], required=True),
+        "team": st.column_config.TextColumn("Squadra", default=""),
+        "expected": st.column_config.NumberColumn("FP attesi", min_value=0, max_value=30, default=6.0),
+        "start_probability": st.column_config.NumberColumn("Titolarità %", min_value=0, max_value=100, default=75, step=1),
+        "risk": st.column_config.SelectboxColumn("Rischio", options=["Basso", "Medio", "Alto"], default="Medio"),
+        "price": st.column_config.NumberColumn("Valore cr", min_value=0, max_value=5000, default=1, step=1),
+        "tier": st.column_config.SelectboxColumn("Tier", options=["S", "A", "B", "C", "D", "E"], default="C"),
+        "trend": st.column_config.NumberColumn("Trend %", min_value=-100, max_value=100, default=0, step=1),
+        "purchase_cost": st.column_config.NumberColumn("Costo", min_value=0, max_value=5000, default=0, step=1),
+    }
+    frame = pd.DataFrame(roster, columns=fields)
+    editor_version = st.session_state.get("roster_version", 0)
+    edited = st.data_editor(frame, hide_index=True, width="stretch", num_rows="dynamic", column_config=columns,
+                            key=f"roster_editor_{league['id']}_{editor_version}")
     if st.button("Salva rosa", type="primary"):
-        for row in edited.to_dict("records"):
-            db.update_player(int(row["ID"]), {"name":row["Giocatore"],"role":row["Ruolo"],"team":row["Squadra"],"expected":float(row["FP attesi"]),"start_probability":int(row["Titolarità %"]),"risk":row["Rischio"],"price":int(row["Valore cr"]),"tier":row["Tier"],"trend":int(row["Trend %"])}, int(league["id"]), int(row["Costo"]))
-        st.toast("Rosa salvata", icon="💾")
-        st.rerun()
-    c1,c2,c3=st.columns(3)
-    c1.metric("Valore rosa",f"{sum(p['price'] for p in roster)} cr")
-    c2.metric("Titolarità media",f"{sum(p['start_probability'] for p in roster)/max(len(roster),1):.0f}%")
-    c3.metric("Alto rischio",str(len([p for p in roster if p['risk']=='Alto'])))
+        try:
+            rows = [{key: value for key, value in row.items() if pd.notna(value)} for row in edited.to_dict("records")]
+            db.replace_roster(int(league["id"]), rows)
+            st.session_state["roster_feedback"] = "Rosa salvata. Le formazioni già confermate restano nello storico."
+            st.session_state["roster_version"] = editor_version + 1
+            st.rerun()
+        except ValueError as exc:
+            st.error(str(exc))
+    c1, c2, c3 = st.columns(3)
+    spent = sum(p["purchase_cost"] for p in roster)
+    c1.metric("Giocatori", len(roster))
+    c2.metric("Costo rosa", f"{spent} cr")
+    c3.metric("Budget residuo", f"{int(league['budget']) - spent} cr")
+    if spent > int(league["budget"]):
+        st.warning("Il costo della rosa supera il budget. Controlla i costi d'acquisto; la rosa iniziale è dimostrativa.")
+    st.download_button("Esporta rosa CSV", roster_csv(roster), "rosa-fantaoperator.csv", "text/csv")
+    with st.expander("Importa la tua rosa da CSV"):
+        st.caption("Usa il modello: name, role (POR/DIF/CEN/ATT), team e purchase_cost. Le altre colonne sono stime facoltative; valori iniziali neutri: 6 FP, 75% titolarità e rischio medio.")
+        st.download_button("Scarica modello rosa", roster_csv([]), "modello-rosa.csv", "text/csv")
+        upload = st.file_uploader("CSV rosa", type=["csv"], key="roster_upload")
+        if upload:
+            try:
+                imported = parse_roster_csv(upload.getvalue())
+                st.dataframe(pd.DataFrame(imported), hide_index=True)
+                st.caption("L'import sostituisce la rosa attuale. Scarica prima l'export per conservarla.")
+                if st.button("Importa questa rosa", disabled=not imported):
+                    db.replace_roster(int(league["id"]), imported)
+                    st.session_state["roster_feedback"] = f"Importati {len(imported)} giocatori."
+                    st.session_state["roster_version"] = editor_version + 1
+                    st.rerun()
+            except (ValueError, UnicodeError) as exc:
+                st.error(str(exc))
+    with st.expander("Aggiungi un giocatore dai voti scaricati"):
+        records = db.records(int(league["id"]), int(league["matchday"]))
+        owned = {p["name"].casefold() for p in roster}
+        candidates = [r for r in records if r["name"].casefold() not in owned]
+        if candidates:
+            names = {r["name"]: r for r in candidates}
+            chosen = st.selectbox("Giocatore disponibile", list(names))
+            cost = st.number_input("Costo d'acquisto", 0, 5000, 1)
+            if st.button("Aggiungi alla rosa"):
+                row = names[chosen]
+                db.replace_roster(int(league["id"]), [*roster, {"name": row["name"], "role": row["role"], "team": row["team"], "purchase_cost": cost}])
+                st.session_state["roster_feedback"] = "Giocatore aggiunto. Completa le tue stime nella tabella."
+                st.session_state["roster_version"] = editor_version + 1
+                st.rerun()
+        else:
+            st.info("Sincronizza i voti della giornata corrente in Voti & dati per avere nomi e ruoli ufficiali.")
 
 
 def page_market(db: Database, league: dict) -> None:
     roster = db.roster(int(league["id"]))
     st.title("Mercato & scambi")
+    if len(roster) < 2:
+        st.info("Inserisci almeno due giocatori in Rosa per confrontarne le valutazioni.")
+        return
+    st.caption("Confronto tra giocatori inseriti in rosa; non invia né registra scambi sulla piattaforma della lega.")
     st.markdown('<div class="subhead">Confronto corretto per minuti attesi, rischio e produzione prevista.</div>', unsafe_allow_html=True)
     a, arrow, b = st.columns([1,.2,1])
     with a: give=st.selectbox("Cedi",[p["name"] for p in roster],index=0)
     with arrow: st.markdown("<h2 style='text-align:center;margin-top:2rem'>⇄</h2>",unsafe_allow_html=True)
-    with b: receive=st.selectbox("Ricevi",[p["name"] for p in roster],index=min(1,len(roster)-1))
+    with b: receive=st.selectbox("Confronta con",[p["name"] for p in roster if p["name"] != give])
     left=next(p for p in roster if p["name"]==give); right=next(p for p in roster if p["name"]==receive)
     result=compare_players(left,right)
     c1,c2,c3=st.columns(3);c1.metric("Delta score",f"{result['delta']:+.2f}");c2.metric("Delta valore",f"{right['price']-left['price']:+d} cr");c3.metric("Verdetto",result["verdict"])
-    st.markdown(f'<div class="decision-box"><h3>Azione</h3><div class="verdict">{result["verdict"]}: {html.escape(give)} → {html.escape(receive)}</div><p>Confidence {result["confidence"]}%. La decisione usa i dati salvati; eventuali informazioni live vanno prima sincronizzate.</p></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="decision-box"><h3>Azione</h3><div class="verdict">{result["verdict"]}: {html.escape(give)} → {html.escape(receive)}</div><p>Indice euristico {result["confidence"]}/100: non è una probabilità di successo. Il confronto usa le stime inserite in rosa.</p></div>',unsafe_allow_html=True)
 
 
 def page_votes(db: Database, league: dict, matchday: int) -> None:
@@ -289,7 +407,10 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
     if latest:
         label, css = status_label(latest)
         st.markdown(f'<div class="source-card"><div><b>{html.escape(str(latest["source_name"]))}</b><br><small>Provider dichiarato</small></div><div><b class="status-{css}">{label}</b><br><small>Stato dati</small></div><div><b>{latest["rows_received"]}</b><br><small>Record ricevuti</small></div><div><b>{fmt_time(latest["checked_at"])}</b><br><small>Ultimo tentativo / acquisizione</small></div></div>', unsafe_allow_html=True)
-        st.caption("Import locale: provenienza non verificata sul Web." if latest["provenance"] == "IMPORT_LOCALE" else "Feed configurato: metadati confrontati con la lega. Non è una certificazione indipendente del provider.")
+        if latest["provenance"] == "PAGINA_UFFICIALE":
+            st.caption("Pagina pubblica Fantacalcio.it ricontrollata. Consolidamento non attestato: dati PROVVISORI. Nessuna garanzia di voti live durante le partite.")
+        else:
+            st.caption("Import locale: provenienza non verificata sul Web." if latest["provenance"] == "IMPORT_LOCALE" else "Feed configurato: metadati confrontati con la lega. Non è una certificazione indipendente del provider.")
         if latest.get("payload_hash"):
             st.markdown(f'<div class="audit">SHA-256 · {latest["payload_hash"]}</div>',unsafe_allow_html=True)
         if latest.get("error"):
@@ -312,8 +433,17 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
         st.download_button("Scarica modello CSV",csv_template(),"fantaoperator-voti-template.csv","text/csv",width="stretch")
     with right:
         st.markdown("### Sincronizza URL configurato")
+        from fantaoperator.public_votes import PUBLIC_VOTES_URL, is_public_votes_url
+        st.link_button("Apri la pagina voti Fantacalcio.it", PUBLIC_VOTES_URL, width="stretch")
+        if not league.get("source_url") and league["vote_provider"] == "Fantacalcio.it":
+            if st.button("Collega questa fonte ufficiale", width="stretch"):
+                db.save_league(int(league["id"]), {"source_url": PUBLIC_VOTES_URL}, league["scoring"])
+                st.rerun()
         st.code(safe_url(league["source_url"]) if league.get("source_url") else "Nessun feed collegato",language=None)
-        st.caption("Il feed deve dichiarare provider, edition, season e matchday. Stato assente = PROVVISORIO. Una pagina HTML o di login non è un feed.")
+        if is_public_votes_url(league.get("source_url", "")):
+            st.caption("Lettura diretta della pagina pubblica per stagione, giornata e redazione selezionate, senza login. Bonus Redazione Fantacalcio; codici speciali senza FV lasciati senza punteggio. Clean sheet e Player of the match non calcolati.")
+        else:
+            st.caption("Il feed deve dichiarare provider, edition, season e matchday. Stato assente = PROVVISORIO. HTML generico e pagine di login vengono rifiutati.")
         if st.button("↻ Verifica e sincronizza",width="stretch",disabled=not bool(league.get("source_url"))):
             result=refresh_votes(db,league,matchday)
             if result["ok"]:
@@ -332,7 +462,7 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
     st.markdown(f"### Giornata {matchday}")
     if records:
         if any(row["fantavote"] is None for row in records):
-            st.warning("Sono presenti S.V.: punteggi incompleti. Sostituzioni, voti d’ufficio e modificatori di squadra richiedono regole dedicate.")
+            st.warning("Punteggi incompleti: S.V., codici speciali senza FV o bonus clean sheet non verificabile. Sostituzioni, voti d’ufficio e modificatori di squadra richiedono regole dedicate.")
         if latest and (latest["status"] == "ERRORE" or any(row["checked_at"] != latest["checked_at"] for row in records)):
             st.warning("Alcuni dati appartengono a verifiche precedenti. Controlla il timestamp di ogni riga.")
         df=pd.DataFrame(records).rename(columns={"name":"Giocatore","role":"Ruolo","team":"Squadra","official_vote":"Voto","fantavote":"Fantavoto","status":"Stato","goals":"Gol","assists":"Assist","yellow_cards":"Amm.","red_cards":"Esp.","source_name":"Fonte","checked_at":"Acquisito"})
@@ -369,6 +499,23 @@ def page_assistant(db: Database, league: dict, matchday: int) -> None:
 
 def page_settings(db: Database, league: dict) -> None:
     st.title("Impostazioni lega")
+    with st.expander("Backup e ripristino", expanded=not bool(os.getenv("FANTAOPERATOR_DB"))):
+        st.caption("Il backup conserva configurazione, rosa e formazioni salvate. Voti e chat non sono inclusi: i voti possono essere scaricati di nuovo. Gli URL privati e l'aggiornamento automatico non vengono ripristinati.")
+        st.download_button("Scarica backup personale", db.export_workspace(int(league["id"])),
+                           "fantaoperator-backup.json", "application/json")
+        backup = st.file_uploader("Ripristina backup personale", type=["json"], key="workspace_backup")
+        if backup:
+            st.caption("Il ripristino sostituisce configurazione, rosa e formazioni attuali. Scarica prima il backup per conservarle.")
+            if st.button("Ripristina questo backup"):
+                try:
+                    db.restore_workspace(int(league["id"]), backup.getvalue())
+                    # Widget values must be recreated from the restored data.
+                    keep = {k: v for k, v in st.session_state.items() if k in ("workspace_db", "workspace_directory")}
+                    st.session_state.clear()
+                    st.session_state.update(keep)
+                    st.rerun()
+                except (ValueError, UnicodeError) as exc:
+                    st.error(str(exc))
     st.markdown('<div class="subhead">Questi vincoli alimentano tutti i calcoli e restano persistenti tra un avvio e l’altro.</div>',unsafe_allow_html=True)
     rules=league["scoring"]
     with st.form("league_settings"):
@@ -377,10 +524,11 @@ def page_settings(db: Database, league: dict) -> None:
         name=a.text_input("Nome lega",league["name"]);platform=b.selectbox("Piattaforma",["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"],index=["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"].index(league["platform"]) if league["platform"] in ["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"] else 3);mode=c.selectbox("Modalità",["Classic","Mantra"],index=0 if league["mode"]=="Classic" else 1)
         d,e,f=st.columns(3);participants=d.number_input("Partecipanti",2,20,int(league["participants"]));budget=e.number_input("Budget iniziale",50,5000,int(league["budget"]));matchday=f.number_input("Giornata corrente",1,38,int(league["matchday"]))
         st.markdown("### Fonte voti prioritaria")
-        g,h=st.columns([1,2]);provider=g.text_input("Provider voti",league["vote_provider"]);source_url=h.text_input("URL feed voti",league["source_url"],placeholder="https://provider.example/{season}/{matchday}.json",type="password")
+        g,h=st.columns([1,2]);provider=g.text_input("Provider voti",league["vote_provider"]);source_url=h.text_input("URL feed voti",league["source_url"],placeholder="https://www.fantacalcio.it/voti-fantacalcio-serie-a",type="password")
         p,q=st.columns(2)
         season=p.text_input("Stagione",league["season"])
         edition=q.text_input("Redazione voti esatta",league["vote_edition"],help="Fantacalcio.it: Redazione Fantacalcio, Voto Statistico oppure Voto Italia")
+        st.caption("È supportata anche la pagina pubblica voti Fantacalcio.it: il collector seleziona stagione e giornata richieste, senza sostituire la redazione.")
         st.caption("Cambiare stagione, provider o redazione separa i dati; gli archivi precedenti non vengono cancellati. Nessun feed ufficiale è configurato automaticamente.")
         auto=st.selectbox("Aggiornamento automatico",[0,5,15,30,60],index=[0,5,15,30,60].index(int(league["auto_sync_minutes"])) if int(league["auto_sync_minutes"]) in [0,5,15,30,60] else 0,format_func=lambda value:"Disattivato" if value==0 else f"Ogni {value} minuti")
         st.markdown("### Bonus e malus")
@@ -404,7 +552,7 @@ def sidebar(latest: dict | None) -> str:
     if "page" not in st.session_state or st.session_state["page"] not in options: st.session_state["page"]=options[0]
     page=st.sidebar.radio("Navigazione",options,key="page",label_visibility="collapsed")
     label,css=status_label(latest)
-    st.sidebar.markdown(f'<div class="sidebar-foot"><span class="dot {"red" if css=="LIVE" else "amber" if css=="PROVVISORIO" else ""}"></span>Motore locale attivo<br><br>Fonte: {html.escape(str(latest["source_name"])) if latest else "non configurata"}<br>Stato: {label}</div>',unsafe_allow_html=True)
+    st.sidebar.markdown(f'<div class="sidebar-foot"><span class="dot {"red" if css=="LIVE" else "amber" if css=="PROVVISORIO" else ""}"></span>Motore operativo attivo<br><br>Fonte: {html.escape(str(latest["source_name"])) if latest else "nessuna acquisizione"}<br>Stato: {label}</div>',unsafe_allow_html=True)
     return page
 
 
@@ -413,12 +561,14 @@ def main() -> None:
     db=database();leagues=db.leagues()
     if not leagues: st.error("Nessuna lega disponibile");return
     league_id=int(st.session_state.get("league_id",leagues[0]["id"]));latest=db.latest_sync(league_id);page=sidebar(latest)
+    if not os.getenv("FANTAOPERATOR_DB"):
+        st.sidebar.info("Spazio personale di questa sessione. Prima di chiudere o ricaricare la pagina, scarica il backup in Impostazioni per ritrovare rosa e formazioni.")
     league,matchday=top_controls(db,league_id,latest)
     st.caption("Rosa e stime iniziali dimostrative · I voti importati sono separati · Nessun accesso live alla lega configurato automaticamente")
     latest=db.latest_sync(int(league["id"]),matchday)
     auto_sync(db,league,latest)
     if "Panoramica" in page: page_overview(db,league,matchday,latest)
-    elif "Formazione" in page: page_lineup(db,league)
+    elif "Formazione" in page: page_lineup(db,league,matchday)
     elif "Asta" in page: page_auction(db,league)
     elif "Rosa" in page: page_roster(db,league)
     elif "Mercato" in page: page_market(db,league)

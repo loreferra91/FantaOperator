@@ -133,7 +133,7 @@ def validate_url(url: str, *, allow_private: bool = False) -> None:
 
 
 def fetch_url(url: str, timeout: int = 12, *, allow_private: bool = False,
-              cookie: str | None = None) -> tuple[bytes, str, str]:
+              cookie: str | None = None, allow_html: bool = False) -> tuple[bytes, str, str]:
     validate_url(url, allow_private=allow_private)
     if cookie:
         parsed = urlsplit(url)
@@ -150,6 +150,8 @@ def fetch_url(url: str, timeout: int = 12, *, allow_private: bool = False,
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
     headers = {"User-Agent": "FantaOperator/2.0", "Cache-Control": "no-cache", "Accept": "application/json,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+    if allow_html:
+        headers["Accept"] = "text/html"
     if cookie:
         headers["Cookie"] = cookie
     request = Request(url, headers=headers)
@@ -164,7 +166,7 @@ def fetch_url(url: str, timeout: int = 12, *, allow_private: bool = False,
             if len(payload) > MAX_PAYLOAD:
                 raise ValueError("Sorgente troppo grande: limite 5 MB")
             content_type = response.headers.get("Content-Type", "")
-            if "html" in content_type or payload.lstrip().lower().startswith((b"<!doctype html", b"<html")):
+            if not allow_html and ("html" in content_type or payload.lstrip().lower().startswith((b"<!doctype html", b"<html"))):
                 raise ValueError("La fonte restituisce una pagina HTML/login, non un export voti. Accesso o formato da verificare.")
             return payload, content_type, response.geturl()
     except HTTPError as exc:
