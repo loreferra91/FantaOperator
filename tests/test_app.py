@@ -10,6 +10,21 @@ from fantaoperator.database import Database
 
 
 class AppNavigationTests(unittest.TestCase):
+    def test_selected_day_drives_sidebar_and_roster_candidates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "day.db"
+            db = Database(path)
+            db.import_records(1, 2, [{"player": "Test candidato", "role": "POR", "vote": 6}],
+                              source_name="Fantacalcio.it", source_url="", payload_hash="test", default_status="PROVVISORIO")
+            with patch.dict("os.environ", {"FANTAOPERATOR_DB": str(path)}):
+                app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
+                next(s for s in app.selectbox if s.label == "Giornata").set_value(2).run()
+                self.assertTrue(any("Stato: PROVVISORIO" in m.value for m in app.sidebar.markdown))
+                app.sidebar.radio[0].set_value("♙  Rosa").run()
+                self.assertEqual(len(app.exception), 0)
+                candidates = next(s for s in app.selectbox if s.label == "Giocatore disponibile")
+                self.assertEqual(candidates.options, ["Test candidato"])
+
     def test_every_page_handles_empty_roster(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "empty.db"

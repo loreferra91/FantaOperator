@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -84,7 +85,7 @@ def fmt_time(value: str | None) -> str:
         return "Mai"
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.astimezone().strftime("%d/%m/%Y %H:%M")
+        return dt.astimezone(ZoneInfo("Europe/Rome")).strftime("%d/%m/%Y %H:%M %Z")
     except ValueError:
         return value
 
@@ -305,7 +306,7 @@ def page_auction(db: Database, league: dict) -> None:
         st.markdown('<div class="panel"><b class="positive">STRATEGIA ANTI-FOMO</b><p style="color:#b8c7cd">Il limite calcolato è vincolante: superarlo riduce il rendimento atteso per credito e la flessibilità sugli slot rimanenti.</p></div>', unsafe_allow_html=True)
 
 
-def page_roster(db: Database, league: dict) -> None:
+def page_roster(db: Database, league: dict, matchday: int) -> None:
     roster = db.roster(int(league["id"]))
     st.title("Rosa & rischio")
     st.caption("Aggiungi o rimuovi righe, poi salva. FP attesi, titolarità, rischio e valore sono tue stime: il download dei voti non le aggiorna.")
@@ -362,7 +363,7 @@ def page_roster(db: Database, league: dict) -> None:
             except (ValueError, UnicodeError) as exc:
                 st.error(str(exc))
     with st.expander("Aggiungi un giocatore dai voti scaricati"):
-        records = db.records(int(league["id"]), int(league["matchday"]))
+        records = db.records(int(league["id"]), matchday)
         owned = {p["name"].casefold() for p in roster}
         candidates = [r for r in records if r["name"].casefold() not in owned]
         if candidates:
@@ -376,7 +377,7 @@ def page_roster(db: Database, league: dict) -> None:
                 st.session_state["roster_version"] = editor_version + 1
                 st.rerun()
         else:
-            st.info("Sincronizza i voti della giornata corrente in Voti & dati per avere nomi e ruoli ufficiali.")
+            st.info(f"Sincronizza i voti della giornata {matchday} in Voti & dati per avere nomi e ruoli ufficiali.")
 
 
 def page_market(db: Database, league: dict) -> None:
@@ -560,17 +561,19 @@ def main() -> None:
     inject_css()
     db=database();leagues=db.leagues()
     if not leagues: st.error("Nessuna lega disponibile");return
-    league_id=int(st.session_state.get("league_id",leagues[0]["id"]));latest=db.latest_sync(league_id);page=sidebar(latest)
+    league_id=int(st.session_state.get("league_id",leagues[0]["id"]));latest=db.latest_sync(league_id)
+    league,matchday=top_controls(db,league_id,latest)
+    latest=db.latest_sync(int(league["id"]),matchday)
+    page=sidebar(latest)
     if not os.getenv("FANTAOPERATOR_DB"):
         st.sidebar.info("Spazio personale di questa sessione. Prima di chiudere o ricaricare la pagina, scarica il backup in Impostazioni per ritrovare rosa e formazioni.")
-    league,matchday=top_controls(db,league_id,latest)
     st.caption("Rosa e stime iniziali dimostrative · I voti importati sono separati · Nessun accesso live alla lega configurato automaticamente")
     latest=db.latest_sync(int(league["id"]),matchday)
     auto_sync(db,league,latest)
     if "Panoramica" in page: page_overview(db,league,matchday,latest)
     elif "Formazione" in page: page_lineup(db,league,matchday)
     elif "Asta" in page: page_auction(db,league)
-    elif "Rosa" in page: page_roster(db,league)
+    elif "Rosa" in page: page_roster(db,league,matchday)
     elif "Mercato" in page: page_market(db,league)
     elif "Voti" in page: page_votes(db,league,matchday)
     elif "Assistente" in page: page_assistant(db,league,matchday)
