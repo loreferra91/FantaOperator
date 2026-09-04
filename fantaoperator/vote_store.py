@@ -93,7 +93,7 @@ class VoteStore:
                 league_id=? AND season=? AND provider=? AND edition=? AND matchday=?""", scope)
             existing = {r[0]: json.loads(r[1]) for r in previous_rows}
             for item in normalized:
-                key = item["player"].casefold()
+                key = f"id:{item['provider_player_id']}" if item.get("provider_player_id") else item["player"].casefold()
                 record = {**item, "name": item["player"], "official_vote": item["vote"],
                           "fantavote": score(item, rules), "source_name": source_name,
                           "source_url": safe_url(source_url), "source_hash": payload_hash,
@@ -101,9 +101,9 @@ class VoteStore:
                           "season": league["season"], "edition": league["vote_edition"], "matchday": matchday}
                 previous = existing.get(key)
                 if previous:
-                    fields = {k: {"prima": previous.get(k), "dopo": record[k]}
-                              for k in ("official_vote", "fantavote", "status", *SCORING_FIELDS)
-                              if previous.get(k) != record[k]}
+                    fields = {k: {"prima": previous.get(k), "dopo": record.get(k)}
+                              for k in ("official_vote", "fantavote", "provider_fantavote", "status", *SCORING_FIELDS)
+                              if previous.get(k) != record.get(k)}
                 else:
                     fields = {"nuovo": {"prima": None, "dopo": record["fantavote"]}}
                 if fields:

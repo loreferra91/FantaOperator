@@ -10,6 +10,7 @@ from threading import Lock
 
 from .official_votes import parse_votes
 from .public_votes import is_public_votes_url, public_votes_url, parse_public_votes
+from .gazzetta_votes import is_gazzetta_votes_url, gazzetta_votes_url, parse_gazzetta_votes, PROVIDER, EDITION
 from .sources import fetch_url, payload_hash
 from .vote_store import context
 
@@ -56,6 +57,23 @@ def refresh_votes(db, league, matchday):
     with collector_lock(db):
         try:
             url = str(league["source_url"]).replace("{season}", league["season"]).replace("{matchday}", str(matchday))
+            if is_gazzetta_votes_url(url):
+                if league["vote_provider"] != PROVIDER or league["vote_edition"] != EDITION:
+                    raise ValueError("Configura provider Gazzetta e redazione La Gazzetta dello Sport per questo URL.")
+                if not url.startswith(gazzetta_votes_url(league["season"])):
+                    raise ValueError("La stagione nell'URL Gazzetta non coincide con la lega: aggiorna l'URL.")
+                requested_url = gazzetta_votes_url(league["season"], matchday)
+                payload, mime, final_url = fetch_url(requested_url, allow_html=True)
+                if final_url.rstrip("/") != requested_url:
+                    raise ValueError("Redirect della pagina Gazzetta: giornata non disponibile o accesso da verificare.")
+                batch = parse_gazzetta_votes(payload, source_url=final_url, provider=league["vote_provider"],
+                    edition=league["vote_edition"], season=league["season"], matchday=matchday)
+                result = db.import_records(league["id"], matchday, batch.records,
+                    source_name=league["vote_provider"], source_url=final_url,
+                    payload_hash=payload_hash(payload), default_status="PROVVISORIO",
+                    provenance="PAGINA_UFFICIALE", expected_context=context(league),
+                    expected_source_url=league["source_url"])
+                return {"ok": True, **result, "warnings": batch.warnings}
             if is_public_votes_url(url):
                 url = public_votes_url(league["season"], matchday)
                 payload, mime, final_url = fetch_url(url, allow_html=True)

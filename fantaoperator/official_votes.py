@@ -22,7 +22,7 @@ NO_VOTE = {"sv", "s.v.", "s.v", "s/v", "-", "--"}
 AMBIGUOUS_FIELDS = {"rf", "rs", "rc", "rig", "r+", "r-", "assf", "asss"}
 ACCEPTED_FIELDS = {
     "player", "vote", "role", "team", "status", "provider_player_id", "provider",
-    "edition", "season", "matchday", "schema_version", "fantavote", "fv",
+    "edition", "season", "matchday", "schema_version", "fantavote", "fv", "provider_fantavote",
     *SCORING_FIELDS, *AMBIGUOUS_FIELDS,
 }
 
@@ -49,7 +49,7 @@ def number(value: Any, field: str) -> float:
 def normalize_rows(rows: Iterable[Mapping[str, Any]], default_status: str = "PROVVISORIO") -> list[dict]:
     if default_status not in STATUSES:
         raise ValueError("Stato dati non valido")
-    result, seen = [], set()
+    result, seen, identities = [], {}, set()
     for raw in rows:
         if not isinstance(raw, Mapping):
             raise ValueError("Ogni record deve essere un oggetto")
@@ -62,9 +62,16 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]], default_status: str = "PRO
         name = str(item.get("player") or "").strip()
         if not name or len(name) > 150:
             raise ValueError("Nome giocatore mancante o troppo lungo")
-        if name.casefold() in seen:
+        source_id = str(item.get("provider_player_id") or "").strip()
+        if source_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", source_id):
+            raise ValueError("Identificativo giocatore della fonte non valido")
+        if name.casefold() in seen and (not source_id or not seen[name.casefold()]):
             raise ValueError(f"Giocatore duplicato/omonimo da risolvere: {name}")
-        seen.add(name.casefold())
+        identity = ("id", source_id) if source_id else ("name", name.casefold())
+        if identity in identities:
+            raise ValueError(f"Giocatore duplicato/omonimo da risolvere: {name}")
+        identities.add(identity)
+        seen[name.casefold()] = source_id
         if "vote" not in item or item["vote"] == "":
             raise ValueError(f"Colonna voto mancante: {name}")
         raw_vote = item["vote"]
@@ -78,6 +85,14 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]], default_status: str = "PRO
         role = {"P": "POR", "D": "DIF", "C": "CEN", "A": "ATT"}.get(role, role)
         row = {"player": name, "vote": vote, "status": status, "role": role,
                "team": str(item.get("team") or "").strip()}
+        if source_id:
+            row["provider_player_id"] = source_id
+        if "provider_fantavote" in item:
+            raw_fv = item["provider_fantavote"]
+            fv = None if raw_fv is None or str(raw_fv).strip().lower() in NO_VOTE else number(raw_fv, "fantavoto pubblicato")
+            if fv is not None and not -100 <= fv <= 100:
+                raise ValueError("Fantavoto pubblicato fuori intervallo")
+            row["provider_fantavote"] = fv
         for key in COUNTERS:
             value = number(0 if item.get(key) in (None, "") else item[key], key)
             if not value.is_integer() or not 0 <= value <= 100:

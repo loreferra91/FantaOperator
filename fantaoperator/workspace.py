@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import math
+import re
 from datetime import datetime, timezone
 
 from .engine import FORMATION_LIMITS, ScoringRules
@@ -12,13 +13,13 @@ from .official_votes import season_name
 from .sources import MAX_PAYLOAD, load_json
 
 
-PLAYER_FIELDS = ("name", "role", "team", "expected", "start_probability", "risk", "price", "tier", "trend")
+PLAYER_FIELDS = ("name", "role", "team", "expected", "start_probability", "risk", "price", "tier", "trend", "vote_provider", "provider_player_id")
 
 
 def validate_roster(rows):
     if not isinstance(rows, list) or len(rows) > 100:
         raise ValueError("La rosa deve contenere al massimo 100 giocatori.")
-    result, names = [], set()
+    result, names, source_ids = [], set(), set()
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Riga della rosa non valida.")
@@ -32,6 +33,17 @@ def validate_roster(rows):
         if not item["name"] or item["name"].casefold() in names:
             raise ValueError("Ogni giocatore deve avere un nome unico e non vuoto.")
         names.add(item["name"].casefold())
+        item["vote_provider"] = str(item.get("vote_provider") or "").strip()
+        item["provider_player_id"] = str(item.get("provider_player_id") or "").strip()
+        if len(item["vote_provider"]) > 120 or (item["provider_player_id"] and not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", item["provider_player_id"])):
+            raise ValueError("Identificativo o fonte giocatore non valido.")
+        if bool(item["vote_provider"]) != bool(item["provider_player_id"]):
+            raise ValueError("Fonte e identificativo giocatore devono essere presenti insieme.")
+        if item["provider_player_id"]:
+            source_id = (item["vote_provider"], item["provider_player_id"])
+            if source_id in source_ids:
+                raise ValueError("La rosa contiene due volte lo stesso giocatore della fonte.")
+            source_ids.add(source_id)
         for key, choices, default in (
             ("role", ("POR", "DIF", "CEN", "ATT"), ""),
             ("risk", ("Basso", "Medio", "Alto"), "Medio"),
@@ -91,11 +103,15 @@ def validate_lineup(formation, players):
 
 
 def lineup_score(players, records):
-    by_name = {r["name"].casefold(): r for r in records}
     scored, missing = [], []
     for player in players:
-        row = by_name.get(player["name"].casefold())
-        if not row or row["fantavote"] is None or (row.get("team") and player.get("team") and row["team"].casefold() != player["team"].casefold()):
+        if player.get("provider_player_id"):
+            candidates = [r for r in records if r.get("provider_player_id") == player["provider_player_id"] and r.get("source_name") == player.get("vote_provider")]
+        else:
+            candidates = [r for r in records if r["name"].casefold() == player["name"].casefold()
+                          and (not r.get("team") or not player.get("team") or r["team"].casefold() == player["team"].casefold())]
+        row = candidates[0] if len(candidates) == 1 else None
+        if not row or row["fantavote"] is None:
             missing.append(player["name"])
         else:
             scored.append(row)
@@ -164,7 +180,8 @@ class WorkspaceStore:
                 "roster": self.roster(league_id), "lineups": lineups}
         # Feed credentials are not included in portable files; public vote URLs are safe.
         from .public_votes import is_public_votes_url
-        if not is_public_votes_url(data["league"]["source_url"]):
+        from .gazzetta_votes import is_gazzetta_votes_url
+        if not (is_public_votes_url(data["league"]["source_url"]) or is_gazzetta_votes_url(data["league"]["source_url"])):
             data["league"]["source_url"] = ""
         data["league"]["auto_sync_minutes"] = 0
         return json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False)

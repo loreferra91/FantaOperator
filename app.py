@@ -17,6 +17,7 @@ from fantaoperator.engine import FORMATION_LIMITS, compare_players, optimize_lin
 from fantaoperator.workspace import PLAYER_FIELDS, lineup_score, parse_roster_csv, roster_csv
 from fantaoperator.sources import csv_template, safe_url
 from fantaoperator.official_votes import EDITIONS
+from fantaoperator.gazzetta_votes import configure_preferred_source, gazzetta_votes_url, is_gazzetta_votes_url, PROVIDER as GAZZETTA_PROVIDER, EDITION as GAZZETTA_EDITION
 from fantaoperator.updater import import_votes, refresh_votes, sync_due
 
 
@@ -38,7 +39,9 @@ def database() -> Database:
             st.session_state["workspace_directory"] = directory
             path = str(Path(directory.name) / "workspace.db")
         st.session_state["workspace_db"] = Database(path)
-    return st.session_state["workspace_db"]
+    db = st.session_state["workspace_db"]
+    configure_preferred_source(db)
+    return db
 
 
 def inject_css() -> None:
@@ -314,6 +317,8 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
         st.success(st.session_state.pop("roster_feedback"))
     fields = [*PLAYER_FIELDS, "purchase_cost"]
     columns = {
+        "vote_provider": None,
+        "provider_player_id": None,
         "name": st.column_config.TextColumn("Giocatore", required=True),
         "role": st.column_config.SelectboxColumn("Ruolo", options=["POR", "DIF", "CEN", "ATT"], required=True),
         "team": st.column_config.TextColumn("Squadra", default=""),
@@ -365,14 +370,18 @@ def page_roster(db: Database, league: dict, matchday: int) -> None:
     with st.expander("Aggiungi un giocatore dai voti scaricati"):
         records = db.records(int(league["id"]), matchday)
         owned = {p["name"].casefold() for p in roster}
-        candidates = [r for r in records if r["name"].casefold() not in owned]
+        owned_ids = {(p.get("vote_provider"), p.get("provider_player_id")) for p in roster if p.get("provider_player_id")}
+        candidates = [r for r in records if (r.get("source_name"),r.get("provider_player_id")) not in owned_ids
+                      and (r.get("provider_player_id") or r["name"].casefold() not in owned)]
         if candidates:
-            names = {r["name"]: r for r in candidates}
+            names = {f"{r['name']} · {r['team']}": r for r in candidates}
             chosen = st.selectbox("Giocatore disponibile", list(names))
             cost = st.number_input("Costo d'acquisto", 0, 5000, 1)
             if st.button("Aggiungi alla rosa"):
                 row = names[chosen]
-                db.replace_roster(int(league["id"]), [*roster, {"name": row["name"], "role": row["role"], "team": row["team"], "purchase_cost": cost}])
+                display_name = row["name"] if row["name"].casefold() not in owned else f"{row['name']} ({row['team']})"
+                db.replace_roster(int(league["id"]), [*roster, {"name": display_name, "role": row["role"], "team": row["team"], "purchase_cost": cost,
+                    "vote_provider": row["source_name"] if row.get("provider_player_id") else "", "provider_player_id": row.get("provider_player_id", "")}])
                 st.session_state["roster_feedback"] = "Giocatore aggiunto. Completa le tue stime nella tabella."
                 st.session_state["roster_version"] = editor_version + 1
                 st.rerun()
@@ -409,7 +418,7 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
         label, css = status_label(latest)
         st.markdown(f'<div class="source-card"><div><b>{html.escape(str(latest["source_name"]))}</b><br><small>Provider dichiarato</small></div><div><b class="status-{css}">{label}</b><br><small>Stato dati</small></div><div><b>{latest["rows_received"]}</b><br><small>Record ricevuti</small></div><div><b>{fmt_time(latest["checked_at"])}</b><br><small>Ultimo tentativo / acquisizione</small></div></div>', unsafe_allow_html=True)
         if latest["provenance"] == "PAGINA_UFFICIALE":
-            st.caption("Pagina pubblica Fantacalcio.it ricontrollata. Consolidamento non attestato: dati PROVVISORI. Nessuna garanzia di voti live durante le partite.")
+            st.caption(f"Pagina pubblica {latest['source_name']} ricontrollata. Consolidamento non attestato: dati PROVVISORI. Nessuna garanzia di voti live durante le partite.")
         else:
             st.caption("Import locale: provenienza non verificata sul Web." if latest["provenance"] == "IMPORT_LOCALE" else "Feed configurato: metadati confrontati con la lega. Non è una certificazione indipendente del provider.")
         if latest.get("payload_hash"):
@@ -435,13 +444,17 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
     with right:
         st.markdown("### Sincronizza URL configurato")
         from fantaoperator.public_votes import PUBLIC_VOTES_URL, is_public_votes_url
-        st.link_button("Apri la pagina voti Fantacalcio.it", PUBLIC_VOTES_URL, width="stretch")
-        if not league.get("source_url") and league["vote_provider"] == "Fantacalcio.it":
+        public_url = gazzetta_votes_url(league["season"]) if league["vote_provider"] == GAZZETTA_PROVIDER else PUBLIC_VOTES_URL
+        if league["vote_provider"] in (GAZZETTA_PROVIDER, "Fantacalcio.it"):
+            st.link_button(f"Apri la pagina voti {league['vote_provider']}", public_url, width="stretch")
+        if not league.get("source_url") and league["vote_provider"] in (GAZZETTA_PROVIDER, "Fantacalcio.it"):
             if st.button("Collega questa fonte ufficiale", width="stretch"):
-                db.save_league(int(league["id"]), {"source_url": PUBLIC_VOTES_URL}, league["scoring"])
+                db.save_league(int(league["id"]), {"source_url": public_url}, league["scoring"])
                 st.rerun()
         st.code(safe_url(league["source_url"]) if league.get("source_url") else "Nessun feed collegato",language=None)
-        if is_public_votes_url(league.get("source_url", "")):
+        if is_gazzetta_votes_url(league.get("source_url", "")):
+            st.caption("Fonte Gazzetta: V è il voto ufficiale, FV Gazzetta è il fantavoto pubblicato. FV lega applica i bonus configurati e può differire. Clean sheet non esplicito; i giocatori senza voto restano senza punteggio calcolato.")
+        elif is_public_votes_url(league.get("source_url", "")):
             st.caption("Lettura diretta della pagina pubblica per stagione, giornata e redazione selezionate, senza login. Bonus Redazione Fantacalcio; codici speciali senza FV lasciati senza punteggio. Clean sheet e Player of the match non calcolati.")
         else:
             st.caption("Il feed deve dichiarare provider, edition, season e matchday. Stato assente = PROVVISORIO. HTML generico e pagine di login vengono rifiutati.")
@@ -467,7 +480,11 @@ def page_votes(db: Database, league: dict, matchday: int) -> None:
         if latest and (latest["status"] == "ERRORE" or any(row["checked_at"] != latest["checked_at"] for row in records)):
             st.warning("Alcuni dati appartengono a verifiche precedenti. Controlla il timestamp di ogni riga.")
         df=pd.DataFrame(records).rename(columns={"name":"Giocatore","role":"Ruolo","team":"Squadra","official_vote":"Voto","fantavote":"Fantavoto","status":"Stato","goals":"Gol","assists":"Assist","yellow_cards":"Amm.","red_cards":"Esp.","source_name":"Fonte","checked_at":"Acquisito"})
-        st.dataframe(df[["Giocatore","Ruolo","Squadra","Voto","Fantavoto","Gol","Assist","Amm.","Esp.","Stato","Fonte","Acquisito"]],hide_index=True,width="stretch")
+        visible_columns = ["Giocatore","Ruolo","Squadra","Voto","Fantavoto","Gol","Assist","Amm.","Esp.","Stato","Fonte","Acquisito"]
+        if "provider_fantavote" in df:
+            df = df.rename(columns={"provider_fantavote":"FV Gazzetta", "Fantavoto":"FV lega"})
+            visible_columns[4:5] = ["FV Gazzetta", "FV lega"]
+        st.dataframe(df[visible_columns],hide_index=True,width="stretch")
     else:
         st.info("Nessun voto importato per questa giornata.")
     history=db.sync_history(int(league["id"]),matchday=matchday)
@@ -525,12 +542,12 @@ def page_settings(db: Database, league: dict) -> None:
         name=a.text_input("Nome lega",league["name"]);platform=b.selectbox("Piattaforma",["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"],index=["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"].index(league["platform"]) if league["platform"] in ["Fantacalcio.it","Leghe Fantacalcio","Gazzetta","Altro"] else 3);mode=c.selectbox("Modalità",["Classic","Mantra"],index=0 if league["mode"]=="Classic" else 1)
         d,e,f=st.columns(3);participants=d.number_input("Partecipanti",2,20,int(league["participants"]));budget=e.number_input("Budget iniziale",50,5000,int(league["budget"]));matchday=f.number_input("Giornata corrente",1,38,int(league["matchday"]))
         st.markdown("### Fonte voti prioritaria")
-        g,h=st.columns([1,2]);provider=g.text_input("Provider voti",league["vote_provider"]);source_url=h.text_input("URL feed voti",league["source_url"],placeholder="https://www.fantacalcio.it/voti-fantacalcio-serie-a",type="password")
+        g,h=st.columns([1,2]);provider=g.text_input("Provider voti",league["vote_provider"]);source_url=h.text_input("URL feed voti",league["source_url"],placeholder=gazzetta_votes_url(league["season"]),type="password")
         p,q=st.columns(2)
         season=p.text_input("Stagione",league["season"])
-        edition=q.text_input("Redazione voti esatta",league["vote_edition"],help="Fantacalcio.it: Redazione Fantacalcio, Voto Statistico oppure Voto Italia")
-        st.caption("È supportata anche la pagina pubblica voti Fantacalcio.it: il collector seleziona stagione e giornata richieste, senza sostituire la redazione.")
-        st.caption("Cambiare stagione, provider o redazione separa i dati; gli archivi precedenti non vengono cancellati. Nessun feed ufficiale è configurato automaticamente.")
+        edition=q.text_input("Redazione voti esatta",league["vote_edition"],help="Gazzetta: La Gazzetta dello Sport. Fantacalcio.it: Redazione Fantacalcio, Voto Statistico oppure Voto Italia")
+        st.caption("Fonte scelta per il progetto: Gazzetta / La Gazzetta dello Sport. Il collegamento legge la singola giornata della stagione indicata nell'URL.")
+        st.caption("Cambiare stagione, provider o redazione separa i dati; gli archivi precedenti non vengono cancellati. Se cambi stagione, aggiorna anche l'URL Gazzetta.")
         auto=st.selectbox("Aggiornamento automatico",[0,5,15,30,60],index=[0,5,15,30,60].index(int(league["auto_sync_minutes"])) if int(league["auto_sync_minutes"]) in [0,5,15,30,60] else 0,format_func=lambda value:"Disattivato" if value==0 else f"Ogni {value} minuti")
         st.markdown("### Bonus e malus")
         keys=[("goal","Gol non su rigore"),("assist","Assist"),("yellow_card","Ammonizione"),("red_card","Espulsione"),("own_goal","Autogol"),("goal_conceded","Gol subito"),("penalty_saved","Rigore parato"),("clean_sheet","Clean sheet"),("penalty_scored","Rigore segnato"),("penalty_missed","Rigore sbagliato")]

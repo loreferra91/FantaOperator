@@ -15,7 +15,7 @@ def _source_line(latest_sync: Mapping[str, Any] | None) -> str:
     checked = str(latest_sync.get("checked_at", "")).replace("T", " ").replace("+00:00", " UTC")
     origin = "Import locale, non verificato sul Web" if latest_sync.get("provenance") == "IMPORT_LOCALE" else "Feed configurato; provenienza dichiarata dal feed"
     if latest_sync.get("provenance") == "PAGINA_UFFICIALE":
-        origin = "Pagina pubblica Fantacalcio.it ricontrollata; consolidamento non attestato. Clean sheet e modificatori non disponibili"
+        origin = f"Pagina pubblica {latest_sync.get('source_name', '')} ricontrollata; consolidamento non attestato. Clean sheet e modificatori non disponibili"
     if status == "ERRORE":
         return f"Ultimo tentativo fallito: **{checked}**. I dati precedenti restano in archivio, non sono stati riverificati."
     return f"Fonte: **{latest_sync.get('source_name', 'N/D')} / {latest_sync.get('edition', '')}** · Stato: **{status}** · Ultima acquisizione: **{checked}**. {origin}."
@@ -25,11 +25,17 @@ def _votes(records: Sequence[Mapping[str, Any]], only_live: bool = False) -> str
     visible = [r for r in records if not only_live or r.get("status") in {"LIVE", "PROVVISORIO"}]
     if not visible:
         return "Non risultano voti disponibili per questa giornata."
-    lines = ["| Giocatore | Voto | Fantavoto | Stato |", "|---|---:|---:|---|"]
+    has_provider_fv = any("provider_fantavote" in r for r in visible)
+    lines = (["| Giocatore | Squadra | Voto | FV pubblicato | FV lega | Stato |", "|---|---|---:|---:|---:|---|"]
+             if has_provider_fv else ["| Giocatore | Voto | Fantavoto | Stato |", "|---|---:|---:|---|"])
     for row in visible:
         vote = "S.V." if row['official_vote'] is None else f"{row['official_vote']:.1f}"
         fv = "N/D" if row['fantavote'] is None else f"{row['fantavote']:.1f}"
-        lines.append(f"| {row['name']} | {vote} | {fv} | {row['status']} |")
+        if has_provider_fv:
+            published = "N/D" if row.get('provider_fantavote') is None else f"{row['provider_fantavote']:.1f}"
+            lines.append(f"| {row['name']} | {row.get('team', '')} | {vote} | {published} | {fv} | {row['status']} |")
+        else:
+            lines.append(f"| {row['name']} | {vote} | {fv} | {row['status']} |")
     return "\n".join(lines)
 
 

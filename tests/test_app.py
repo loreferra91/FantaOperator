@@ -7,6 +7,7 @@ from unittest.mock import patch
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 from fantaoperator.database import Database
+from fantaoperator.gazzetta_votes import configure_preferred_source
 
 
 class AppNavigationTests(unittest.TestCase):
@@ -14,8 +15,9 @@ class AppNavigationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "day.db"
             db = Database(path)
+            configure_preferred_source(db)
             db.import_records(1, 2, [{"player": "Test candidato", "role": "POR", "vote": 6}],
-                              source_name="Fantacalcio.it", source_url="", payload_hash="test", default_status="PROVVISORIO")
+                              source_name="Gazzetta", source_url="", payload_hash="test", default_status="PROVVISORIO")
             with patch.dict("os.environ", {"FANTAOPERATOR_DB": str(path)}):
                 app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
                 next(s for s in app.selectbox if s.label == "Giornata").set_value(2).run()
@@ -23,7 +25,7 @@ class AppNavigationTests(unittest.TestCase):
                 app.sidebar.radio[0].set_value("♙  Rosa").run()
                 self.assertEqual(len(app.exception), 0)
                 candidates = next(s for s in app.selectbox if s.label == "Giocatore disponibile")
-                self.assertEqual(candidates.options, ["Test candidato"])
+                self.assertEqual(candidates.options, ["Test candidato · "])
 
     def test_every_page_handles_empty_roster(self):
         with tempfile.TemporaryDirectory() as directory:

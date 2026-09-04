@@ -31,8 +31,11 @@ il backup è necessario per continuare in un'altra sessione/dispositivo.
   esportazione e conservazione dello snapshot anche dopo modifiche alla rosa.
 - **Panoramica**: punteggio dell'undici salvato, copertura dei voti e totale parziale esplicito.
   Nessun voto abbinabile resta senza totale, non diventa zero. Nomi e squadre devono corrispondere.
-- **Voti & dati**: import XLSX/CSV/JSON e lettura della pagina pubblica ufficiale Fantacalcio.it.
-  Verifica reale del 4 settembre 2026: 319 record della giornata 2, stagione 2026/27.
+- **Voti & dati**: import XLSX/CSV/JSON e lettura della pagina pubblica Gazzetta scelta per questa lega.
+  Verifica reale del 4 settembre 2026: 315 record della giornata 2, stagione 2026/27,
+  dei quali 301 con voto. La pagina contiene V, G, A, R, RS, AG, AM, ES e FV.
+  L'app conserva il **FV Gazzetta** pubblicato e calcola separatamente il **FV lega**
+  secondo i bonus configurati. Il valore pubblicato non viene usato per dedurre eventi mancanti.
 - **Asta e mercato**: calcolatori sulle valutazioni inserite. Non registrano acquisti/scambi
   sulla piattaforma della lega. Gli indici euristici non sono probabilità di successo.
 
@@ -66,13 +69,21 @@ Codice originale: nessuno dei repository GitHub discussi è installato o copiato
 
 | Modulo | Funzione / limite |
 | --- | --- |
+| gazzetta_votes.py | Pagina pubblica Gazzetta per stagione/giornata: voto, FV pubblicato, eventi, ruolo, squadra e identità del giocatore. Fonte predefinita del progetto. |
 | official_votes.py | XLSX/CSV/JSON, validazione periodo/redazione, eventi e S.V. Testato con fixture sintetiche, non con l'export autenticato della tua lega. |
 | public_votes.py | Pagina pubblica Fantacalcio.it: voti per redazione, eventi, stagione e giornata; nessun login. Contratto HTML verificato il 2 settembre 2026. |
 | updater.py | Download del feed esplicito, import atomico, rettifiche, errori e worker. Condiviso da UI e comandi. |
 | vote_store.py | Archivi isolati per lega, stagione, provider, redazione, giornata. |
 | league_scraper.py | Confine sicuro per export privati JSON normalizzati. **Non è un parser validato della API privata Fantacalcio.it**; rose/formazioni/risultati non sono collegati alla UI. |
 
-La [pagina pubblica voti](https://www.fantacalcio.it/voti-fantacalcio-serie-a) è ora supportata direttamente:
+La fonte scelta per il progetto è la [pagina pubblica voti Gazzetta](https://www.gazzetta.it/calcio/fantanews/voti/serie-a-2026-27/).
+Ogni nuova installazione e ogni database esistente vengono configurati una sola volta con
+`Gazzetta / La Gazzetta dello Sport`; le modifiche manuali successive restano rispettate.
+La pagina generale viene trasformata nell'URL esatto `giornata-N`, poi titolo, stagione,
+giornata, intestazioni e identità dei calciatori vengono verificati prima dell'import.
+Gli omonimi abbreviati sono distinti con l'identificativo Gazzetta presente nel link giocatore.
+
+Il precedente connettore alla [pagina pubblica voti Fantacalcio.it](https://www.fantacalcio.it/voti-fantacalcio-serie-a) resta disponibile:
 i numeri sono negli attributi `data-value`, non nel testo delle celle. Non serve il download XLSX riservato.
 In **Voti & dati**, con provider Fantacalcio.it e URL vuoto, premi **Collega questa fonte ufficiale**;
 oppure salva questo URL in **Impostazioni**. Poi scegli la giornata e **Verifica e sincronizza**.

@@ -147,6 +147,10 @@ class Database(VoteStore, WorkspaceStore):
             )
             self.initialize_votes(db)
             self.initialize_workspace(db)
+            player_columns = {row["name"] for row in db.execute("PRAGMA table_info(players)")}
+            for column in ("vote_provider", "provider_player_id"):
+                if column not in player_columns:
+                    db.execute(f"ALTER TABLE players ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
             count = db.execute("SELECT COUNT(*) FROM leagues").fetchone()[0]
             if count == 0:
                 now = utc_now()
